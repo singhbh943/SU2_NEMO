@@ -78,6 +78,14 @@ class CNEMOEulerVariable : public CFlowVariable {
   /*--- Primitive variable definition ---*/
   MatrixType Primitive_Aux;            /*!< \brief Primitive auxiliary variables (Y_s, T, Tve, ...) in compressible flows. */
 
+  /*
+   * Last conservative state known to admit a valid thermochemical
+   * conservative-to-primitive conversion.  This is deliberately
+   * independent of Solution_Old, which remains the RK/time-integration
+   * storage owned by CVariable.
+   */
+  MatrixType Solution_Accepted;
+
   /*--- Secondary variable definition ---*/
   MatrixType Secondary;                /*!< \brief Primitive variables (T, vx, vy, vz, P, rho, h, c) in compressible flows. */
   CVectorOfMatrix Gradient_Secondary;  /*!< \brief Gradient of the primitive variables (T, vx, vy, vz, P, rho). */
@@ -182,6 +190,22 @@ class CNEMOEulerVariable : public CFlowVariable {
   bool Cons2PrimVar(su2double *U, su2double *V, su2double *dPdU,
                     su2double *dTdU, su2double *dTvedU, su2double *val_eves,
                     su2double *val_Cvves);
+
+  /*!
+   * \brief Find a thermochemically admissible fraction of an implicit
+   * conservative update without modifying the live solution.
+   *
+   * Starting from initial_alpha, the trial update is repeatedly halved
+   * until Cons2PrimVar accepts the candidate state.
+   *
+   * \return Accepted alpha, or 0.0 if no admissible trial is found.
+   */
+  su2double ComputeAdmissibleImplicitStep(
+      unsigned long iPoint,
+      const su2double *deltaU,
+      su2double initial_alpha,
+      CFluidModel *FluidModel,
+      unsigned short max_backtracks);
 
   /*---------------------------------------*/
   /*---   Specific variable routines    ---*/
@@ -321,7 +345,6 @@ class CNEMOEulerVariable : public CFlowVariable {
    * \brief Returns the value of Cvve at the specified node
    */
   su2double *GetCvve(unsigned long iPoint) { return Cvves[iPoint]; }
-
   /*!
    * \brief Set partial derivative of pressure w.r.t. density \f$\frac{\partial P}{\partial \rho_s}\f$
    */

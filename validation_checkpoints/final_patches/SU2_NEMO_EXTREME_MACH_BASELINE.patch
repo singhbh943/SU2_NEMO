@@ -1,0 +1,4412 @@
+diff --git a/Common/include/CConfig.hpp b/Common/include/CConfig.hpp
+index 71f780bbed..086c31e601 100644
+--- a/Common/include/CConfig.hpp
++++ b/Common/include/CConfig.hpp
+@@ -152,6 +152,22 @@ private:
+   su2double CL_Target;         /*!< \brief Fixed Cl mode Target Cl. */
+   su2double Confinement_Param; /*!< \brief Confinement paramenter for Vorticity Confinement method. */
+   TIME_MARCHING TimeMarching;        /*!< \brief Steady or unsteady (time stepping or dual time stepping) computation. */
++
++  bool Adaptive_Physical_Time;       /*!< \brief Enable variable physical time step for dual-time integration. */
++  su2double Physical_Time_Step_Growth; /*!< \brief Maximum physical time-step growth factor per physical step. */
++  su2double Max_Physical_Time_Step;  /*!< \brief Maximum dimensional physical time step (s). */
++
++  /*
++   * Previous physical step in non-dimensional units.
++   * Runtime state used by variable-step BDF2; this is not a config-file option.
++   */
++  su2double Previous_Delta_UnstTimeND = 0.0;
++
++  /*
++   * Accumulated non-dimensional physical time for adaptive stepping.
++   * Fixed-dt cases continue to use the legacy TimeIter*dt relation.
++   */
++  su2double Adaptive_Physical_Time_AccumND = 0.0;
+   su2double FixAzimuthalLine;        /*!< \brief Fix an azimuthal line due to misalignments of the nearfield. */
+   su2double **DV_Value;              /*!< \brief Previous value of the design variable. */
+   su2double Venkat_LimiterCoeff;     /*!< \brief Limiter coefficient */
+@@ -2968,6 +2984,25 @@ public:
+    */
+   su2double GetUnst_CFL(void) const { return Unst_CFL; }
+ 
++  /*!
++   * \brief Whether variable physical time stepping is enabled.
++   */
++  bool GetAdaptive_Physical_Time(void) const { return Adaptive_Physical_Time; }
++
++  /*!
++   * \brief Maximum allowed multiplicative increase in physical dt.
++   */
++  su2double GetPhysical_Time_Step_Growth(void) const {
++    return Physical_Time_Step_Growth;
++  }
++
++  /*!
++   * \brief Maximum dimensional physical time step in seconds.
++   */
++  su2double GetMax_Physical_Time_Step(void) const {
++    return Max_Physical_Time_Step;
++  }
++
+   /*!
+    * \brief Get information about element reorientation
+    * \return    <code>TRUE</code> means that elements can be reoriented if suspected unhealthy
+@@ -6084,6 +6119,34 @@ public:
+    */
+   void SetDelta_UnstTimeND(su2double val_delta_unsttimend) { Delta_UnstTimeND = val_delta_unsttimend; }
+ 
++  /*!
++   * \brief Previous non-dimensional physical time step used by variable-step BDF2.
++   */
++  su2double GetPrevious_Delta_UnstTimeND(void) const {
++    return Previous_Delta_UnstTimeND;
++  }
++
++  /*!
++   * \brief Store previous non-dimensional physical time step.
++   */
++  void SetPrevious_Delta_UnstTimeND(su2double val_dt) {
++    Previous_Delta_UnstTimeND = val_dt;
++  }
++
++  /*!
++   * \brief Accumulated non-dimensional physical time.
++   */
++  su2double GetAdaptive_Physical_Time_AccumND(void) const {
++    return Adaptive_Physical_Time_AccumND;
++  }
++
++  /*!
++   * \brief Set accumulated non-dimensional physical time.
++   */
++  void SetAdaptive_Physical_Time_AccumND(su2double val_time) {
++    Adaptive_Physical_Time_AccumND = val_time;
++  }
++
+   /*!
+    * \brief If we are performing an unsteady simulation, this is the
+    *    value of max physical time for which we run the simulation
+diff --git a/Common/src/CConfig.cpp b/Common/src/CConfig.cpp
+index 0f7a5c6821..c45bf81b2e 100644
+--- a/Common/src/CConfig.cpp
++++ b/Common/src/CConfig.cpp
+@@ -1848,6 +1848,15 @@ void CConfig::SetConfig_Options() {
+   addUnsignedShortOption("TIME_DOFS_ADER_DG", nTimeDOFsADER_DG, 2);
+   /* DESCRIPTION: Unsteady Courant-Friedrichs-Lewy number of the finest grid */
+   addDoubleOption("UNST_CFL_NUMBER", Unst_CFL, 0.0);
++
++  /* DESCRIPTION: Enable variable physical time step for dual-time integration. */
++  addBoolOption("ADAPTIVE_PHYSICAL_TIME", Adaptive_Physical_Time, false);
++
++  /* DESCRIPTION: Maximum multiplicative growth of physical dt per physical step. */
++  addDoubleOption("PHYSICAL_TIME_STEP_GROWTH", Physical_Time_Step_Growth, 1.25);
++
++  /* DESCRIPTION: Maximum dimensional physical time step for adaptive dual-time integration (s). */
++  addDoubleOption("MAX_PHYSICAL_TIME_STEP", Max_Physical_Time_Step, 1.0e20);
+   /* DESCRIPTION: Integer number of periodic time instances for Harmonic Balance */
+   addUnsignedShortOption("TIME_INSTANCES", nTimeInstances, 1);
+   /* DESCRIPTION: Time period for Harmonic Balance wihtout moving meshes */
+@@ -7353,8 +7362,6 @@ void CConfig::SetOutput(SU2_COMPONENT val_software, unsigned short val_izone) {
+           break;
+         case EULER_IMPLICIT:
+           cout << "Euler implicit method for the flow equations." << endl;
+-          if (Kind_FluidModel == MUTATIONPP)
+-            SU2_MPI::Error("Implicit time scheme is not yet implemented with Mutation++. Use EULER_EXPLICIT.", CURRENT_FUNCTION);
+           switch (Kind_Linear_Solver) {
+             case BCGSTAB:
+             case FGMRES:
+diff --git a/SU2_CFD/include/fluid/CMutationTCLib.hpp b/SU2_CFD/include/fluid/CMutationTCLib.hpp
+index b280c70ec9..bd01bfcd40 100644
+--- a/SU2_CFD/include/fluid/CMutationTCLib.hpp
++++ b/SU2_CFD/include/fluid/CMutationTCLib.hpp
+@@ -79,6 +79,17 @@ public:
+    */
+   vector<su2double>& ComputeSpeciesCvVibEle(su2double val_T) final;
+ 
++  /*!
++   * \brief Compute the exact local derivative of V-E energy density with
++   * respect to Tve for the Mutation++ two-temperature energy definition.
++   */
++  su2double ComputerhoCvve() final;
++
++  /*!
++   * \brief Compute dT/dU using Mutation++'s own two-mode species energies.
++   */
++  void ComputedTdU(const su2double *V, su2double *val_dTdU) final;
++
+   /*!
+    * \brief Compute mixture energies (total internal energy and vibrational energy).
+    */
+@@ -101,6 +112,13 @@ public:
+    */
+   su2double ComputeEveSourceTerm() final;
+ 
++  /*!
++   * \brief Populate the Mutation++ V-E energy-transfer source Jacobian.
++   */
++  void GetEveSourceTermJacobian(const su2double *V, const su2double *eve, const su2double *cvve,
++                                const su2double *dTdU, const su2double *dTvedU,
++                                su2double **val_jacobian) final;
++
+   /*!
+    * \brief Compute species enthalpies.
+    */
+diff --git a/SU2_CFD/include/fluid/CNEMOGas.hpp b/SU2_CFD/include/fluid/CNEMOGas.hpp
+index 1037ab30f0..6418b89f37 100644
+--- a/SU2_CFD/include/fluid/CNEMOGas.hpp
++++ b/SU2_CFD/include/fluid/CNEMOGas.hpp
+@@ -209,7 +209,7 @@ public:
+   /*!
+    * \brief Compute derivative of temperature w.r.t. conservative variables.
+    */
+-  void ComputedTdU(const su2double *V, su2double *val_dTdU);
++  virtual void ComputedTdU(const su2double *V, su2double *val_dTdU);
+ 
+   /*!
+    * \brief Compute derivative of vibrational temperature w.r.t. conservative variables.
+@@ -236,7 +236,7 @@ public:
+    */
+   inline su2double ComputerhoCvtr() {
+     rhoCvtr = 0.0;
+-    for (iSpecies = 0; iSpecies < nHeavy; iSpecies++)
++    for (iSpecies = nEl; iSpecies < nSpecies; iSpecies++)
+       rhoCvtr += rhos[iSpecies]*Cvtrs[iSpecies];
+     return rhoCvtr;
+   }
+@@ -244,7 +244,7 @@ public:
+   /*!
+    * \brief Compute rhoCvve.
+    */
+-  su2double ComputerhoCvve();
++  virtual su2double ComputerhoCvve();
+ 
+   /*!
+    * \brief Get species molar mass.
+diff --git a/SU2_CFD/include/numerics/NEMO/CNEMONumerics.hpp b/SU2_CFD/include/numerics/NEMO/CNEMONumerics.hpp
+index 9ffe4ad335..2aaed0bce1 100644
+--- a/SU2_CFD/include/numerics/NEMO/CNEMONumerics.hpp
++++ b/SU2_CFD/include/numerics/NEMO/CNEMONumerics.hpp
+@@ -223,6 +223,19 @@ public:
+     su2double RuSI= UNIVERSAL_GAS_CONSTANT;
+     su2double Ru  = 1000.0*RuSI;
+     const auto& Ds  = val_diffusion_coeff;
++
++    /*
++     * val_Mean_PrimVar stores species mass fractions in this routine.
++     * Put the numerics-owned thermochemical model at the same mean edge
++     * state before requesting enthalpies or heat capacities.
++     */
++    vector<su2double> state_rhos(nSpecies, 0.0);
++    const su2double rho_mean = val_Mean_PrimVar[RHO_INDEX];
++    for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies)
++      state_rhos[iSpecies] =
++          rho_mean * val_Mean_PrimVar[RHOS_INDEX+iSpecies];
++
++    fluidmodel->SetTDStateRhosTTv(state_rhos, T, Tve);
+     const auto& hs = fluidmodel->ComputeSpeciesEnthalpy(T, Tve, val_Mean_Eve);
+     const auto& Cvtr = fluidmodel->GetSpeciesCvTraRot();
+     const auto& Ms = fluidmodel->GetSpeciesMolarMass();
+diff --git a/SU2_CFD/include/solvers/CFVMFlowSolverBase.hpp b/SU2_CFD/include/solvers/CFVMFlowSolverBase.hpp
+index da14a8ef95..470670cc8a 100644
+--- a/SU2_CFD/include/solvers/CFVMFlowSolverBase.hpp
++++ b/SU2_CFD/include/solvers/CFVMFlowSolverBase.hpp
+@@ -83,6 +83,12 @@ class CFVMFlowSolverBase : public CSolver {
+   su2double Global_Delta_Time = 0.0, /*!< \brief Time-step for TIME_STEPPING time marching strategy. */
+   Global_Delta_UnstTimeND = 0.0;     /*!< \brief Unsteady time step for the dual time strategy. */
+ 
++  /*
++   * Scratch storage for the convective physical Courant controller.
++   * Stores sum_f |u_f . S_f| for each node-centered dual volume.
++   */
++  std::vector<su2double> Adaptive_Physical_Flux_Sum;
++
+   unsigned long ErrorCounter = 0;    /*!< \brief Counter for number of un-physical states. */
+ 
+   /*!
+@@ -574,31 +580,329 @@ class CFVMFlowSolverBase : public CSolver {
+ 
+     }
+ 
+-    /*--- Recompute the unsteady time step for the dual time strategy if the unsteady CFL is different from 0.
+-     * This is only done once because in dual time the time step cannot be variable. ---*/
+-
+-    if (dual_time && (Iteration == config->GetRestart_Iter()) && (config->GetUnst_CFL() != 0.0) && (iMesh == MESH_0)) {
++    /*
++     * Physical dt for dual-time integration.
++     *
++     * Legacy behavior is preserved when ADAPTIVE_PHYSICAL_TIME=NO:
++     * the CFL-based physical step is computed only once.
++     *
++     * Adaptive mode recomputes the candidate physical step at the first
++     * inner iteration of every physical-time iteration.  The initial step
++     * remains TIME_STEP; subsequent steps are limited by:
++     *
++     *   min(dt_CFL, growth*dt_old, dt_max).
++     */
++    const bool adaptive_physical_time =
++        config->GetAdaptive_Physical_Time();
++
++    if (dual_time && (config->GetUnst_CFL() != 0.0) &&
++        (iMesh == MESH_0) &&
++        (!adaptive_physical_time &&
++         (Iteration == config->GetRestart_Iter()))) {
+ 
+-      /*--- Thread-local variable for reduction. ---*/
+       su2double glbDtND = 1e30;
+ 
+       SU2_OMP_FOR_(schedule(static,omp_chunk_size) SU2_NOWAIT)
+       for (auto iPoint = 0ul; iPoint < nPointDomain; iPoint++) {
+-        glbDtND = min(glbDtND, config->GetUnst_CFL()*Global_Delta_Time / nodes->GetLocalCFL(iPoint));
++        glbDtND = min(
++            glbDtND,
++            config->GetUnst_CFL()*Global_Delta_Time /
++            nodes->GetLocalCFL(iPoint));
+       }
+       END_SU2_OMP_FOR
++
+       atomicMin(glbDtND, Global_Delta_UnstTimeND);
+ 
+       BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
+       {
+-        SU2_MPI::Allreduce(&Global_Delta_UnstTimeND, &glbDtND, 1, MPI_DOUBLE, MPI_MIN, SU2_MPI::GetComm());
+-        Global_Delta_UnstTimeND = glbDtND;
++        SU2_MPI::Allreduce(
++            &Global_Delta_UnstTimeND, &glbDtND,
++            1, MPI_DOUBLE, MPI_MIN, SU2_MPI::GetComm());
+ 
++        Global_Delta_UnstTimeND = glbDtND;
+         config->SetDelta_UnstTimeND(Global_Delta_UnstTimeND);
+       }
+       END_SU2_OMP_SAFE_GLOBAL_ACCESS
+     }
+ 
++    if (dual_time && adaptive_physical_time &&
++        (config->GetUnst_CFL() != 0.0) &&
++        (iMesh == MESH_0) &&
++        (config->GetInnerIter() == 0)) {
++
++      /*
++       * hy2Foam/OpenFOAM-style physical Courant controller.
++       *
++       * This is deliberately different from SU2's pseudo-time CFL:
++       *
++       *   Co_i = dt/(2 V_i) *
++       *          sum_f |u_f . S_f|
++       *
++       * The acoustic speed and viscous spectral radius are NOT included
++       * in this physical Courant number.
++       *
++       * Variable-step BDF2 is handled separately in
++       * SetResidual_DualTime().
++       */
++
++      if (dynamic_grid) {
++        SU2_MPI::Error(
++            "ADAPTIVE_PHYSICAL_TIME currently supports static grids only.",
++            CURRENT_FUNCTION);
++      }
++
++      /*
++       * Adaptive restart state (current dt, previous dt and accumulated
++       * physical time) is restored from the flow restart metadata.
++       */
++      const su2double old_dt =
++          config->GetDelta_UnstTimeND();
++
++      const su2double max_dt =
++          config->GetMax_Physical_Time_Step() /
++          config->GetTime_Ref();
++
++      const su2double targetCo =
++          config->GetUnst_CFL();
++
++      const su2double growthCap =
++          config->GetPhysical_Time_Step_Growth();
++
++      if ((old_dt <= 0.0) ||
++          (max_dt <= 0.0) ||
++          (targetCo <= 0.0) ||
++          (growthCap < 1.0)) {
++
++        SU2_MPI::Error(
++            "Adaptive physical-time stepping requires positive TIME_STEP, "
++            "UNST_CFL_NUMBER, MAX_PHYSICAL_TIME_STEP and "
++            "PHYSICAL_TIME_STEP_GROWTH >= 1.",
++            CURRENT_FUNCTION);
++      }
++
++      /*
++       * Resize/reset shared node scratch storage.
++       */
++      BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
++      {
++        Adaptive_Physical_Flux_Sum.assign(
++            nPointDomain, 0.0);
++      }
++      END_SU2_OMP_SAFE_GLOBAL_ACCESS
++
++      /*
++       * Internal dual faces.
++       *
++       * The SU2 edge normal already contains face area, therefore
++       * GetProjVel(...,Normal) has units of velocity*area in dimensional
++       * form, exactly what is needed for the Courant flux sum.
++       */
++      SU2_OMP_FOR_(schedule(static,omp_chunk_size))
++      for (auto iPoint = 0ul;
++           iPoint < nPointDomain;
++           ++iPoint) {
++
++        su2double fluxSum = 0.0;
++
++        for (unsigned short iNeigh = 0;
++             iNeigh < geometry->nodes->GetnPoint(iPoint);
++             ++iNeigh) {
++
++          const auto jPoint =
++              geometry->nodes->GetPoint(iPoint, iNeigh);
++
++          const auto iEdge =
++              geometry->nodes->GetEdge(iPoint, iNeigh);
++
++          const auto Normal =
++              geometry->edges->GetNormal(iEdge);
++
++          const su2double Mean_ProjVel =
++              0.5 *
++              (nodes->GetProjVel(iPoint, Normal) +
++               nodes->GetProjVel(jPoint, Normal));
++
++          fluxSum += fabs(Mean_ProjVel);
++        }
++
++        Adaptive_Physical_Flux_Sum[iPoint] =
++            fluxSum;
++      }
++      END_SU2_OMP_FOR
++
++      /*
++       * Physical boundary faces.
++       *
++       * Internal and periodic interfaces are excluded.  Wall and symmetry
++       * faces may be included safely: their normal physical velocity should
++       * be zero, while farfield/outlet faces contribute their actual mass-
++       * transport velocity scale.
++       */
++      BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
++      {
++        for (unsigned short iMarker = 0;
++             iMarker < geometry->GetnMarker();
++             ++iMarker) {
++
++          const auto kindBC =
++              config->GetMarker_All_KindBC(iMarker);
++
++          if ((kindBC == INTERNAL_BOUNDARY) ||
++              (kindBC == PERIODIC_BOUNDARY))
++            continue;
++
++          for (unsigned long iVertex = 0;
++               iVertex < geometry->GetnVertex(iMarker);
++               ++iVertex) {
++
++            const auto iPoint =
++                geometry->vertex[iMarker][iVertex]->GetNode();
++
++            if (!geometry->nodes->GetDomain(iPoint))
++              continue;
++
++            if (iPoint >= nPointDomain)
++              continue;
++
++            const auto Normal =
++                geometry->vertex[iMarker][iVertex]->GetNormal();
++
++            Adaptive_Physical_Flux_Sum[iPoint] +=
++                fabs(nodes->GetProjVel(iPoint, Normal));
++          }
++        }
++      }
++      END_SU2_OMP_SAFE_GLOBAL_ACCESS
++
++      /*
++       * Compute the maximum physical Courant number associated with the
++       * current physical dt.
++       */
++      ompMasterAssignBarrier(
++          Global_Delta_UnstTimeND, 0.0);
++
++      su2double localMaxCo = 0.0;
++
++      SU2_OMP_FOR_(schedule(static,omp_chunk_size) SU2_NOWAIT)
++      for (auto iPoint = 0ul;
++           iPoint < nPointDomain;
++           ++iPoint) {
++
++        const su2double Vol =
++            geometry->nodes->GetVolume(iPoint);
++
++        if (Vol <= 0.0)
++          continue;
++
++        const su2double localCo =
++            0.5 * old_dt *
++            Adaptive_Physical_Flux_Sum[iPoint] /
++            Vol;
++
++        localMaxCo =
++            max(localMaxCo, localCo);
++      }
++      END_SU2_OMP_FOR
++
++      atomicMax(
++          localMaxCo,
++          Global_Delta_UnstTimeND);
++
++      BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
++      {
++        su2double globalMaxCo = 0.0;
++
++        SU2_MPI::Allreduce(
++            &Global_Delta_UnstTimeND,
++            &globalMaxCo,
++            1,
++            MPI_DOUBLE,
++            MPI_MAX,
++            SU2_MPI::GetComm());
++
++        /*
++         * OpenFOAM-style controller:
++         *
++         *   maxDeltaTFact = targetCo / currentCo
++         *
++         * reductions are immediate; increases are damped.
++         *
++         * PHYSICAL_TIME_STEP_GROWTH is the absolute growth cap.
++         */
++        const su2double coRatio =
++            targetCo /
++            (globalMaxCo + EPS);
++
++        const su2double growthFactor =
++            min(
++                coRatio,
++                min(
++                    1.0 + 0.1*coRatio,
++                    growthCap));
++
++        su2double new_dt =
++            min(
++                old_dt*growthFactor,
++                max_dt);
++
++        if (new_dt <= 0.0) {
++          SU2_MPI::Error(
++              "Physical Courant controller produced dt <= 0.",
++              CURRENT_FUNCTION);
++        }
++
++        /*
++         * Previous dt is required by variable-step BDF2.
++         */
++        config->SetPrevious_Delta_UnstTimeND(
++            old_dt);
++
++        config->SetDelta_UnstTimeND(
++            new_dt);
++
++        Global_Delta_UnstTimeND =
++            new_dt;
++
++        /*
++         * With frozen velocity during controller evaluation, this is the
++         * Courant number corresponding to the newly selected dt.
++         */
++        const su2double estimatedNewCo =
++            globalMaxCo *
++            new_dt /
++            old_dt;
++
++        if (SU2_MPI::GetRank() == MASTER_NODE) {
++
++          cout
++              << "[NEMO_PHYSICAL_CO]"
++              << " time_iter="
++              << config->GetTimeIter()
++
++              << " Co_old="
++              << globalMaxCo
++
++              << " targetCo="
++              << targetCo
++
++              << " factor="
++              << growthFactor
++
++              << " dt_old="
++              << old_dt*config->GetTime_Ref()
++
++              << " dt_new="
++              << new_dt*config->GetTime_Ref()
++
++              << " Co_new_est="
++              << estimatedNewCo
++
++              << endl;
++        }
++      }
++      END_SU2_OMP_SAFE_GLOBAL_ACCESS
++    }
++
+     /*--- The pseudo local time (explicit integration) cannot be greater than the physical time ---*/
+ 
+     if (dual_time && !implicit) {
+diff --git a/SU2_CFD/include/solvers/CFVMFlowSolverBase.inl b/SU2_CFD/include/solvers/CFVMFlowSolverBase.inl
+index 05ec25a0e5..6b8e0bb4bc 100644
+--- a/SU2_CFD/include/solvers/CFVMFlowSolverBase.inl
++++ b/SU2_CFD/include/solvers/CFVMFlowSolverBase.inl
+@@ -1680,6 +1680,54 @@ void CFVMFlowSolverBase<V, FlowRegime>::SetResidual_DualTime(CGeometry *geometry
+ 
+   TimeStep = config->GetDelta_UnstTimeND();
+ 
++  const bool adaptive_physical_time =
++      config->GetAdaptive_Physical_Time();
++
++  /*
++   * Variable-step BDF2:
++   *
++   * h = dt_{n+1}, k = dt_n, r = h/k
++   *
++   * a0 = (1 + 2r)/(h(1+r))
++   * a1 = -(1+r)/h
++   * a2 = r^2/(h(1+r))
++   *
++   * For r=1 this exactly reduces to
++   * 3/(2h), -4/(2h), 1/(2h).
++   */
++  su2double bdf_a0 = 0.0;
++  su2double bdf_a1 = 0.0;
++  su2double bdf_a2 = 0.0;
++
++  if (second_order && adaptive_physical_time) {
++
++    if (dynamic_grid) {
++      SU2_MPI::Error(
++          "Variable-step BDF2 currently supports static grids only.",
++          CURRENT_FUNCTION);
++    }
++
++    su2double PreviousTimeStep =
++        config->GetPrevious_Delta_UnstTimeND();
++
++    if (PreviousTimeStep <= 0.0)
++      PreviousTimeStep = TimeStep;
++
++    const su2double ratio =
++        TimeStep / PreviousTimeStep;
++
++    bdf_a0 =
++        (1.0 + 2.0*ratio) /
++        (TimeStep*(1.0 + ratio));
++
++    bdf_a1 =
++        -(1.0 + ratio) / TimeStep;
++
++    bdf_a2 =
++        (ratio*ratio) /
++        (TimeStep*(1.0 + ratio));
++  }
++
+   /*--- Compute the dual time-stepping source term for static meshes ---*/
+ 
+   if (!dynamic_grid) {
+@@ -1710,15 +1758,31 @@ void CFVMFlowSolverBase<V, FlowRegime>::SetResidual_DualTime(CGeometry *geometry
+       for (iVar = 0; iVar < nVar; iVar++) {
+         if (first_order)
+           LinSysRes(iPoint,iVar) += (U_time_nP1[iVar] - U_time_n[iVar])*Volume_nP1 / TimeStep;
+-        if (second_order)
+-          LinSysRes(iPoint,iVar) += ( 3.0*U_time_nP1[iVar] - 4.0*U_time_n[iVar]
+-                                     +1.0*U_time_nM1[iVar])*Volume_nP1 / (2.0*TimeStep);
++        if (second_order) {
++          if (adaptive_physical_time)
++            LinSysRes(iPoint,iVar) +=
++                (bdf_a0*U_time_nP1[iVar] +
++                 bdf_a1*U_time_n[iVar] +
++                 bdf_a2*U_time_nM1[iVar])*Volume_nP1;
++          else
++            LinSysRes(iPoint,iVar) +=
++                (3.0*U_time_nP1[iVar] -
++                 4.0*U_time_n[iVar] +
++                 1.0*U_time_nM1[iVar])*Volume_nP1 /
++                (2.0*TimeStep);
++        }
+       }
+ 
+       /*--- Compute the Jacobian contribution due to the dual time source term. ---*/
+       if (implicit) {
+         if (first_order) Jacobian.AddVal2Diag(iPoint, Volume_nP1/TimeStep);
+-        if (second_order) Jacobian.AddVal2Diag(iPoint, (Volume_nP1*3.0)/(2.0*TimeStep));
++        if (second_order) {
++          if (adaptive_physical_time)
++            Jacobian.AddVal2Diag(iPoint, Volume_nP1*bdf_a0);
++          else
++            Jacobian.AddVal2Diag(
++                iPoint, (Volume_nP1*3.0)/(2.0*TimeStep));
++        }
+       }
+     }
+     END_SU2_OMP_FOR
+@@ -1838,7 +1902,13 @@ void CFVMFlowSolverBase<V, FlowRegime>::SetResidual_DualTime(CGeometry *geometry
+       /*--- Compute the Jacobian contribution due to the dual time source term. ---*/
+       if (implicit) {
+         if (first_order) Jacobian.AddVal2Diag(iPoint, Volume_nP1/TimeStep);
+-        if (second_order) Jacobian.AddVal2Diag(iPoint, (Volume_nP1*3.0)/(2.0*TimeStep));
++        if (second_order) {
++          if (adaptive_physical_time)
++            Jacobian.AddVal2Diag(iPoint, Volume_nP1*bdf_a0);
++          else
++            Jacobian.AddVal2Diag(
++                iPoint, (Volume_nP1*3.0)/(2.0*TimeStep));
++        }
+       }
+     }
+     END_SU2_OMP_FOR
+diff --git a/SU2_CFD/include/variables/CNEMOEulerVariable.hpp b/SU2_CFD/include/variables/CNEMOEulerVariable.hpp
+index 408dcc7c14..351e1135e9 100644
+--- a/SU2_CFD/include/variables/CNEMOEulerVariable.hpp
++++ b/SU2_CFD/include/variables/CNEMOEulerVariable.hpp
+@@ -78,6 +78,14 @@ class CNEMOEulerVariable : public CFlowVariable {
+   /*--- Primitive variable definition ---*/
+   MatrixType Primitive_Aux;            /*!< \brief Primitive auxiliary variables (Y_s, T, Tve, ...) in compressible flows. */
+ 
++  /*
++   * Last conservative state known to admit a valid thermochemical
++   * conservative-to-primitive conversion.  This is deliberately
++   * independent of Solution_Old, which remains the RK/time-integration
++   * storage owned by CVariable.
++   */
++  MatrixType Solution_Accepted;
++
+   /*--- Secondary variable definition ---*/
+   MatrixType Secondary;                /*!< \brief Primitive variables (T, vx, vy, vz, P, rho, h, c) in compressible flows. */
+   CVectorOfMatrix Gradient_Secondary;  /*!< \brief Gradient of the primitive variables (T, vx, vy, vz, P, rho). */
+@@ -183,6 +191,22 @@ class CNEMOEulerVariable : public CFlowVariable {
+                     su2double *dTdU, su2double *dTvedU, su2double *val_eves,
+                     su2double *val_Cvves);
+ 
++  /*!
++   * \brief Find a thermochemically admissible fraction of an implicit
++   * conservative update without modifying the live solution.
++   *
++   * Starting from initial_alpha, the trial update is repeatedly halved
++   * until Cons2PrimVar accepts the candidate state.
++   *
++   * \return Accepted alpha, or 0.0 if no admissible trial is found.
++   */
++  su2double ComputeAdmissibleImplicitStep(
++      unsigned long iPoint,
++      const su2double *deltaU,
++      su2double initial_alpha,
++      CFluidModel *FluidModel,
++      unsigned short max_backtracks);
++
+   /*---------------------------------------*/
+   /*---   Specific variable routines    ---*/
+   /*---------------------------------------*/
+@@ -321,7 +345,6 @@ class CNEMOEulerVariable : public CFlowVariable {
+    * \brief Returns the value of Cvve at the specified node
+    */
+   su2double *GetCvve(unsigned long iPoint) { return Cvves[iPoint]; }
+-
+   /*!
+    * \brief Set partial derivative of pressure w.r.t. density \f$\frac{\partial P}{\partial \rho_s}\f$
+    */
+diff --git a/SU2_CFD/src/drivers/CSinglezoneDriver.cpp b/SU2_CFD/src/drivers/CSinglezoneDriver.cpp
+index fa6e5ac300..9be636a7f3 100644
+--- a/SU2_CFD/src/drivers/CSinglezoneDriver.cpp
++++ b/SU2_CFD/src/drivers/CSinglezoneDriver.cpp
+@@ -85,6 +85,27 @@ void CSinglezoneDriver::StartSolver() {
+ 
+     Update();
+ 
++
++    /*
++     * Adaptive physical time is accumulated after each completed step.
++     * Update() has already advanced the physical solution from n to n+1,
++     * so Monitor() and Output() see the new physical time.
++     */
++    if ((config_container[ZONE_0]->GetTime_Marching() !=
++         TIME_MARCHING::STEADY) &&
++        config_container[ZONE_0]->GetAdaptive_Physical_Time()) {
++
++      const su2double new_physical_time =
++          config_container[ZONE_0]->GetAdaptive_Physical_Time_AccumND() +
++          config_container[ZONE_0]->GetDelta_UnstTimeND();
++
++      config_container[ZONE_0]->
++          SetAdaptive_Physical_Time_AccumND(new_physical_time);
++
++      config_container[ZONE_0]->
++          SetPhysicalTime(new_physical_time);
++    }
++
+     /*--- Monitor the computations after each iteration. ---*/
+ 
+     Monitor(TimeIter);
+@@ -117,7 +138,11 @@ void CSinglezoneDriver::Preprocess(unsigned long TimeIter) {
+    general once the drivers are more stable. ---*/
+ 
+   if (config_container[ZONE_0]->GetTime_Marching() != TIME_MARCHING::STEADY)
+-    config_container[ZONE_0]->SetPhysicalTime(static_cast<su2double>(TimeIter)*config_container[ZONE_0]->GetDelta_UnstTimeND());
++    config_container[ZONE_0]->SetPhysicalTime(
++        config_container[ZONE_0]->GetAdaptive_Physical_Time()
++            ? config_container[ZONE_0]->GetAdaptive_Physical_Time_AccumND()
++            : static_cast<su2double>(TimeIter) *
++                  config_container[ZONE_0]->GetDelta_UnstTimeND());
+   else
+     config_container[ZONE_0]->SetPhysicalTime(0.0);
+ 
+diff --git a/SU2_CFD/src/fluid/CMutationTCLib.cpp b/SU2_CFD/src/fluid/CMutationTCLib.cpp
+index 44a751a8f3..b46e42b6c9 100644
+--- a/SU2_CFD/src/fluid/CMutationTCLib.cpp
++++ b/SU2_CFD/src/fluid/CMutationTCLib.cpp
+@@ -28,6 +28,8 @@
+ #if defined(HAVE_MPP) && !defined(CODI_REVERSE_TYPE) && !defined(CODI_FORWARD_TYPE)
+ 
+ #include "../../include/fluid/CMutationTCLib.hpp"
++#include <cmath>
++#include <limits>
+ 
+ CMutationTCLib::CMutationTCLib(const CConfig* config, unsigned short val_nDim): CNEMOGas(config, val_nDim){
+ 
+@@ -58,6 +60,21 @@ CMutationTCLib::CMutationTCLib(const CConfig* config, unsigned short val_nDim):
+   /* Initialize mixture object */
+   mix.reset(new Mutation::Mixture(opt));
+ 
++  /*
++   * SU2 sizes all NEMO species arrays from GAS_COMPOSITION, whereas
++   * Mutation++ obtains its species count from the selected mixture.
++   * A mismatch would otherwise lead to out-of-bounds access below
++   * (for example while building the catalytic recombination table).
++   */
++  if (static_cast<unsigned short>(mix->nSpecies()) != nSpecies) {
++    SU2_MPI::Error(
++        "Mutation++ mixture '" + gas_model + "' contains " +
++        std::to_string(mix->nSpecies()) +
++        " species, but SU2 GAS_COMPOSITION defines " +
++        std::to_string(nSpecies) + ".",
++        CURRENT_FUNCTION);
++  }
++
+   // x1000 to have Molar Mass in kg/kmol
+   for(iSpecies = 0; iSpecies < nSpecies; iSpecies++)
+     MolarMass[iSpecies] = 1000* mix->speciesMw(iSpecies);
+@@ -65,31 +82,87 @@ CMutationTCLib::CMutationTCLib(const CConfig* config, unsigned short val_nDim):
+   if (mix->hasElectrons()) { nHeavy = nSpecies-1; nEl = 1; }
+   else { nHeavy = nSpecies; nEl = 0; }
+ 
+-  /*--- Set up catalytic recombination table. ---*/
+-  // Creation/Destruction (+1/-1), Index of monoatomic reactants
+-  // Monoatomic species (N,O) recombine into diaatomic (N2, O2) species
+-  if (gas_model == "N2") {
+-    CatRecombTable(0,0) =  1; CatRecombTable(0,1) = 1; // N2
+-    CatRecombTable(1,0) = -1; CatRecombTable(1,1) = 1; // N
+-
+-  } else if (gas_model == "air_5"){
+-    CatRecombTable(0,0) = -1; CatRecombTable(0,1) = 0; // N
+-    CatRecombTable(1,0) = -1; CatRecombTable(1,1) = 1; // O
+-    CatRecombTable(2,0) =  0; CatRecombTable(2,1) = 4; // NO
+-    CatRecombTable(3,0) =  1; CatRecombTable(3,1) = 0; // N2
+-    CatRecombTable(4,0) =  1; CatRecombTable(4,1) = 1; // O2
+-
+-  } else if (gas_model == "air_6") {
+-    CatRecombTable(0,0) = -1; CatRecombTable(0,1) = 0; // N
+-    CatRecombTable(1,0) = -1; CatRecombTable(1,1) = 1; // O
+-    CatRecombTable(2,0) =  0; CatRecombTable(2,1) = 4; // NO
+-    CatRecombTable(3,0) =  1; CatRecombTable(3,1) = 0; // N2
+-    CatRecombTable(4,0) =  1; CatRecombTable(4,1) = 1; // O2
+-    CatRecombTable(5,0) =  0; CatRecombTable(5,1) = 4; // Ar
+-
+-  } else {
+-    if (config->GetCatalytic())
+-      SU2_MPI::Error("Catalytic wall recombination not implemented for specified Mutation gas model.", CURRENT_FUNCTION);
++  /*--- Set up catalytic recombination table. -----------------------------*/
++  /*
++   * Catalytic recombination map.
++   *
++   * Column 0:
++   *   +1 : species produced at the wall
++   *   -1 : species consumed at the wall
++   *    0 : species unaffected by the neutral catalytic model
++   *
++   * Column 1:
++   *   Index of the incident atomic species controlling the wall flux.
++   *
++   * Supported heterogeneous neutral reactions:
++   *
++   *       N + N -> N2
++   *       O + O -> O2
++   *
++   * Species are identified by their Mutation++ names instead of fixed
++   * array positions.  This makes the catalytic-wall model compatible
++   * with different mixture orderings, including AIR-5, AIR-7 and
++   * AIR-11.
++   *
++   * Charged species and electrons are left catalytically inactive here.
++   * Their wall interaction requires a separate plasma-wall model.
++   */
++
++  /*--- Default: every species has zero catalytic source. ---*/
++  for (iSpecies = 0; iSpecies < nSpecies; ++iSpecies) {
++    CatRecombTable(iSpecies, 0) = 0;
++    CatRecombTable(iSpecies, 1) = iSpecies;
++  }
++
++  /*--- Obtain actual Mutation++ species indices. ---*/
++  const int iN  = mix->speciesIndex("N");
++  const int iO  = mix->speciesIndex("O");
++  const int iN2 = mix->speciesIndex("N2");
++  const int iO2 = mix->speciesIndex("O2");
++
++  bool nitrogen_recombination = false;
++  bool oxygen_recombination   = false;
++
++  /*--- Nitrogen heterogeneous recombination: N + N -> N2. ---*/
++  if ((iN >= 0) && (iN2 >= 0)) {
++
++    /* Atomic nitrogen is removed from the gas. */
++    CatRecombTable(iN, 0) = -1;
++    CatRecombTable(iN, 1) = iN;
++
++    /* Molecular nitrogen receives the corresponding mass flux. */
++    CatRecombTable(iN2, 0) = 1;
++    CatRecombTable(iN2, 1) = iN;
++
++    nitrogen_recombination = true;
++  }
++
++  /*--- Oxygen heterogeneous recombination: O + O -> O2. ---*/
++  if ((iO >= 0) && (iO2 >= 0)) {
++
++    /* Atomic oxygen is removed from the gas. */
++    CatRecombTable(iO, 0) = -1;
++    CatRecombTable(iO, 1) = iO;
++
++    /* Molecular oxygen receives the corresponding mass flux. */
++    CatRecombTable(iO2, 0) = 1;
++    CatRecombTable(iO2, 1) = iO;
++
++    oxygen_recombination = true;
++  }
++
++  /*
++   * A catalytic wall is meaningful only if at least one supported
++   * recombination pair is present in the selected Mutation++ mixture.
++   */
++  if (config->GetCatalytic() &&
++      !nitrogen_recombination &&
++      !oxygen_recombination) {
++
++    SU2_MPI::Error(
++        "Catalytic wall requested but the Mutation++ mixture does not "
++        "contain a supported N/N2 or O/O2 recombination pair.",
++        CURRENT_FUNCTION);
+   }
+ 
+ }
+@@ -142,6 +215,91 @@ vector<su2double>& CMutationTCLib::ComputeSpeciesCvVibEle(su2double val_T){
+    return Cvves;
+ }
+ 
++su2double CMutationTCLib::ComputerhoCvve(){
++
++  /*
++   * ChemNonEqTTv advances the second conserved energy with the second
++   * species-energy row returned by getEnergiesMass().  For ionized
++   * mixtures, summing the mode-specific values returned by getCvsMass()
++   * is not exactly the derivative of that energy definition (the
++   * electron contribution is the important case).  Differentiate the
++   * actual Mutation++ V-E energy density locally instead.
++   */
++  const su2double T0 = T;
++  const su2double Tve0 = Tve;
++  const su2double abs_Tve = std::abs(Tve0);
++  const su2double dTve =
++      2.0e-6 * ((abs_Tve > 1.0) ? abs_Tve : su2double(1.0));
++
++  auto eve_density = [&](const su2double probe_Tve) {
++    temperatures[0] = T0;
++    temperatures[1] = probe_Tve;
++    mix->setState(rhos.data(), temperatures.data(), 1);
++    mix->getEnergiesMass(es.data());
++
++    su2double value = 0.0;
++    for (iSpecies = 0; iSpecies < nSpecies; ++iSpecies)
++      value += rhos[iSpecies] * es[nSpecies+iSpecies];
++
++    return value;
++  };
++
++  const su2double eve_plus = eve_density(Tve0 + dTve);
++  const su2double eve_minus = eve_density(Tve0 - dTve);
++  rhoCvve = (eve_plus - eve_minus) / (2.0*dTve);
++
++  /*--- Restore the exact Mutation++ state and base species-energy buffer. ---*/
++  temperatures[0] = T0;
++  temperatures[1] = Tve0;
++  mix->setState(rhos.data(), temperatures.data(), 1);
++  mix->getEnergiesMass(es.data());
++
++  if ((!std::isfinite(rhoCvve)) || (rhoCvve <= 0.0))
++    SU2_MPI::Error("Invalid Mutation++ V-E heat-capacity derivative.", CURRENT_FUNCTION);
++
++  return rhoCvve;
++}
++
++void CMutationTCLib::ComputedTdU(const su2double *V, su2double *val_dTdU){
++
++  const unsigned long VEL_INDEX = nSpecies+2;
++  const unsigned long RHOCVTR_INDEX = nSpecies+nDim+6;
++
++  /*
++   * The first Mutation++ energy row is the total static internal energy
++   * carried by each species, while the second row is the V-E/electron
++   * energy.  Their difference is therefore the part controlled by T.
++   * Using these two rows avoids reconstructing the energy from formation
++   * enthalpy/reference-temperature data and also supplies the missing
++   * electron-density derivative.
++   */
++  mix->getEnergiesMass(es.data());
++
++  const su2double rhoCvtr_local = V[RHOCVTR_INDEX];
++
++  su2double velocity2 = 0.0;
++  for (iDim = 0; iDim < nDim; ++iDim)
++    velocity2 += V[VEL_INDEX+iDim] * V[VEL_INDEX+iDim];
++
++  for (iSpecies = 0; iSpecies < nSpecies; ++iSpecies) {
++    const su2double e_tr =
++        es[iSpecies] - es[nSpecies+iSpecies];
++
++    val_dTdU[iSpecies] =
++        (0.5*velocity2 - e_tr) / rhoCvtr_local;
++  }
++
++  for (iDim = 0; iDim < nDim; ++iDim)
++    val_dTdU[nSpecies+iDim] =
++        -V[VEL_INDEX+iDim] / rhoCvtr_local;
++
++  val_dTdU[nSpecies+nDim] =
++      1.0 / rhoCvtr_local;
++
++  val_dTdU[nSpecies+nDim+1] =
++      -1.0 / rhoCvtr_local;
++}
++
+ vector<su2double>& CMutationTCLib::ComputeMixtureEnergies(){
+ 
+   SetTDStateRhosTTv(rhos, T, Tve);
+@@ -166,8 +324,127 @@ vector<su2double>& CMutationTCLib::ComputeNetProductionRates(bool implicit, cons
+                                                const su2double* cvve, const su2double* dTdU, const su2double* dTvedU,
+                                                su2double **val_jacobian){
+ 
++  /*--- Production rates at the current Mutation++ state. ---*/
+   mix->netProductionRates(ws.data());
+ 
++  if (implicit) {
++
++    const unsigned short nVar = nSpecies + nDim + 2;
++
++    const unsigned long T_INDEX   = nSpecies;
++    const unsigned long TVE_INDEX = nSpecies + 1;
++
++    /*
++     * Mutation++ analytic composition Jacobian:
++     *
++     *   J_rho(i,j) = d omega_i / d rho_j |_T,Tve
++     *
++     * Row-major storage is documented by Mutation++.
++     */
++    vector<su2double> jac_rho(nSpecies*nSpecies, 0.0);
++    mix->jacobianRho(jac_rho.data());
++
++    /*
++     * Species conservative variables are the species partial densities:
++     *
++     *   U_s = rho_s
++     */
++    vector<su2double> state_rhos(nSpecies, 0.0);
++    for (iSpecies = 0; iSpecies < nSpecies; ++iSpecies)
++      state_rhos[iSpecies] = V[iSpecies];
++
++    const su2double T0   = V[T_INDEX];
++    const su2double Tve0 = V[TVE_INDEX];
++
++    /*
++     * Centered temperature perturbations.
++     *
++     * 1e-5 is close to the O(eps^(1/3)) scale appropriate for a
++     * centered first derivative in double precision while remaining
++     * sufficiently local for the thermochemical source.
++     */
++    const su2double rel_step = 1.0e-5;
++
++    const su2double abs_T   = (T0   >= 0.0) ? T0   : -T0;
++    const su2double abs_Tve = (Tve0 >= 0.0) ? Tve0 : -Tve0;
++
++    const su2double dT =
++        rel_step * ((abs_T > 1.0) ? abs_T : 1.0);
++
++    const su2double dTve =
++        rel_step * ((abs_Tve > 1.0) ? abs_Tve : 1.0);
++
++    vector<su2double> w_T_plus(nSpecies, 0.0);
++    vector<su2double> w_T_minus(nSpecies, 0.0);
++    vector<su2double> w_Tve_plus(nSpecies, 0.0);
++    vector<su2double> w_Tve_minus(nSpecies, 0.0);
++
++    su2double perturbed_temperatures[2];
++
++    /*--- d omega / dT at fixed rho_s and Tve. ---*/
++    perturbed_temperatures[0] = T0 + dT;
++    perturbed_temperatures[1] = Tve0;
++
++    mix->setState(state_rhos.data(), perturbed_temperatures, 1);
++    mix->netProductionRates(w_T_plus.data());
++
++    perturbed_temperatures[0] = T0 - dT;
++    perturbed_temperatures[1] = Tve0;
++
++    mix->setState(state_rhos.data(), perturbed_temperatures, 1);
++    mix->netProductionRates(w_T_minus.data());
++
++    /*--- d omega / dTve at fixed rho_s and T. ---*/
++    perturbed_temperatures[0] = T0;
++    perturbed_temperatures[1] = Tve0 + dTve;
++
++    mix->setState(state_rhos.data(), perturbed_temperatures, 1);
++    mix->netProductionRates(w_Tve_plus.data());
++
++    perturbed_temperatures[0] = T0;
++    perturbed_temperatures[1] = Tve0 - dTve;
++
++    mix->setState(state_rhos.data(), perturbed_temperatures, 1);
++    mix->netProductionRates(w_Tve_minus.data());
++
++    /*--- Restore the exact thermochemical state present on entry. ---*/
++    perturbed_temperatures[0] = T0;
++    perturbed_temperatures[1] = Tve0;
++
++    mix->setState(state_rhos.data(), perturbed_temperatures, 1);
++
++    /*
++     * Conservative-variable chemistry Jacobian:
++     *
++     * d omega_i / dU_j
++     *   = J_rho(i,j)
++     *   + d omega_i/dT   * dT/dU_j
++     *   + d omega_i/dTve * dTve/dU_j.
++     */
++    for (iSpecies = 0; iSpecies < nSpecies; ++iSpecies) {
++
++      const su2double dwdT =
++          (w_T_plus[iSpecies] - w_T_minus[iSpecies]) /
++          (2.0*dT);
++
++      const su2double dwdTve =
++          (w_Tve_plus[iSpecies] - w_Tve_minus[iSpecies]) /
++          (2.0*dTve);
++
++      for (unsigned short iVar = 0; iVar < nVar; ++iVar) {
++
++        su2double domegadU =
++            dwdT   * dTdU[iVar] +
++            dwdTve * dTvedU[iVar];
++
++        if (iVar < nSpecies)
++          domegadU += jac_rho[iSpecies*nSpecies + iVar];
++
++        val_jacobian[iSpecies][iVar] += domegadU;
++      }
++    }
++  }
++
+   return ws;
+ }
+ 
+@@ -180,8 +457,138 @@ su2double CMutationTCLib::ComputeEveSourceTerm(){
+   return omega;
+ }
+ 
++void CMutationTCLib::GetEveSourceTermJacobian(
++    const su2double *V, const su2double *eve, const su2double *cvve,
++    const su2double *dTdU, const su2double *dTvedU,
++    su2double **val_jacobian) {
++
++  const unsigned short nVar = nSpecies + nDim + 2;
++  const unsigned short nEve = nSpecies + nDim + 1;
++
++  const unsigned long T_INDEX   = nSpecies;
++  const unsigned long TVE_INDEX = nSpecies + 1;
++
++  /*
++   * Mutation++ does not currently provide derivatives of the 2-T energy
++   * transfer source.  Different transfer models contribute to this source
++   * (not only the chemical omega_s e_ve,s term), so differentiate the
++   * complete energyTransferSource() numerically and then apply SU2's
++   * conservative-variable temperature chain rule.
++   *
++   * The eve/cvve arguments are intentionally unused here: they belong to
++   * the common CNEMOGas interface and are needed by the native SU2 model,
++   * but Mutation++ supplies the complete V-E source directly.
++   */
++  (void)eve;
++  (void)cvve;
++
++  vector<su2double> state_rhos(nSpecies, 0.0);
++  for (iSpecies = 0; iSpecies < nSpecies; ++iSpecies)
++    state_rhos[iSpecies] = V[iSpecies];
++
++  const su2double T0   = V[T_INDEX];
++  const su2double Tve0 = V[TVE_INDEX];
++
++  const su2double rel_step = 1.0e-5;
++  const su2double rho_floor = 1.0e-12;
++
++  auto abs_value = [](const su2double value) {
++    return (value >= 0.0) ? value : -value;
++  };
++
++  auto energy_source =
++      [&](const vector<su2double>& densities,
++          const su2double temperature,
++          const su2double temperature_ve) {
++
++    su2double local_temperatures[2] = {temperature, temperature_ve};
++    mix->setState(densities.data(), local_temperatures, 1);
++    mix->energyTransferSource(omega_vec.data());
++    return omega_vec[0];
++  };
++
++  /*--- Direct derivatives at fixed temperatures: dQve/drho_s. ---*/
++  vector<su2double> dQdrho(nSpecies, 0.0);
++
++  const su2double base_source = energy_source(state_rhos, T0, Tve0);
++
++  for (iSpecies = 0; iSpecies < nSpecies; ++iSpecies) {
++
++    const su2double rho0 = state_rhos[iSpecies];
++    const su2double rho_scale =
++        (abs_value(rho0) > rho_floor) ? abs_value(rho0) : rho_floor;
++    const su2double drho = rel_step * rho_scale;
++
++    state_rhos[iSpecies] = rho0 + drho;
++    const su2double source_plus = energy_source(state_rhos, T0, Tve0);
++
++    if (rho0 > drho) {
++      state_rhos[iSpecies] = rho0 - drho;
++      const su2double source_minus = energy_source(state_rhos, T0, Tve0);
++      dQdrho[iSpecies] = (source_plus - source_minus) / (2.0 * drho);
++    } else {
++      /*--- Keep non-negative densities for zero/trace species. ---*/
++      dQdrho[iSpecies] = (source_plus - base_source) / drho;
++    }
++
++    state_rhos[iSpecies] = rho0;
++  }
++
++  /*--- Temperature derivatives at fixed species densities. ---*/
++  const su2double abs_T   = abs_value(T0);
++  const su2double abs_Tve = abs_value(Tve0);
++
++  const su2double dT =
++      rel_step * ((abs_T > 1.0) ? abs_T : 1.0);
++  const su2double dTve =
++      rel_step * ((abs_Tve > 1.0) ? abs_Tve : 1.0);
++
++  const su2double source_T_plus =
++      energy_source(state_rhos, T0 + dT, Tve0);
++  const su2double source_T_minus =
++      energy_source(state_rhos, T0 - dT, Tve0);
++  const su2double dQdT =
++      (source_T_plus - source_T_minus) / (2.0 * dT);
++
++  const su2double source_Tve_plus =
++      energy_source(state_rhos, T0, Tve0 + dTve);
++  const su2double source_Tve_minus =
++      energy_source(state_rhos, T0, Tve0 - dTve);
++  const su2double dQdTve =
++      (source_Tve_plus - source_Tve_minus) / (2.0 * dTve);
++
++  /*--- Restore the exact thermochemical state present on entry. ---*/
++  energy_source(state_rhos, T0, Tve0);
++
++  /*
++   * Qve = Qve(rho_1,...,rho_ns,T,Tve), hence
++   *
++   * dQve/dU_j = dQve/drho_j
++   *            + dQve/dT   dT/dU_j
++   *            + dQve/dTve dTve/dU_j.
++   */
++  for (unsigned short iVar = 0; iVar < nVar; ++iVar) {
++
++    su2double dQdU =
++        dQdT   * dTdU[iVar] +
++        dQdTve * dTvedU[iVar];
++
++    if (iVar < nSpecies)
++      dQdU += dQdrho[iVar];
++
++    val_jacobian[nEve][iVar] += dQdU;
++  }
++}
++
+ vector<su2double>& CMutationTCLib::ComputeSpeciesEnthalpy(su2double val_T, su2double val_Tve, su2double *val_eves){
+ 
++  /*
++   * getEnthalpiesMass() evaluates the current Mutation++ state.  Make the
++   * temperature arguments of this SU2 interface authoritative instead of
++   * silently returning properties from whichever state was evaluated last.
++   * The caller is responsible for loading the appropriate species densities.
++   */
++  SetTDStateRhosTTv(rhos, val_T, val_Tve);
+   mix->getEnthalpiesMass(hs.data());
+ 
+   return hs;
+@@ -216,12 +623,96 @@ vector<su2double>& CMutationTCLib::ComputeTemperatures(vector<su2double>& val_rh
+   energies[1] = rhoEve;
+ 
+   mix->setState(rhos.data(), energies.data(), 0);
+-
+   mix->getTemperatures(temperatures.data());
+ 
+   T   = temperatures[0];
+   Tve = temperatures[1];
+ 
++  /*
++   * ChemNonEqTTvStateModel::solveEnergies() only prints a warning when
++   * its nonlinear inversion reaches the iteration limit; it does not
++   * propagate a convergence flag.  Consequently, in-range T/Tve values
++   * can otherwise be accepted by SU2 even when they do not reproduce
++   * the requested conservative energies.
++   *
++   * Recompute the two mixture energies at the returned state and apply
++   * the same absolute/relative closure criterion used internally by
++   * Mutation++.
++   */
++  double rho = 0.0;
++  for (iSpecies = 0; iSpecies < nSpecies; ++iSpecies)
++    rho += rhos[iSpecies];
++
++  /*
++   * Reproduce ChemNonEqTTvStateModel::solveEnergies() using the same
++   * species-energy array and the original rho_i/rho mass fractions.
++   * Avoid mixtureEnergies(), which reconstructs Y through X_TO_Y and
++   * introduces a different floating-point path.
++   */
++  mix->getEnergiesMass(es.data());
++
++  double returnedEnergies[2] = {0.0, 0.0};
++
++  for (iSpecies = 0; iSpecies < nSpecies; ++iSpecies) {
++    const double yi = rhos[iSpecies] / rho;
++
++    returnedEnergies[0] += es[iSpecies] * yi;
++    returnedEnergies[1] += es[nSpecies + iSpecies] * yi;
++  }
++
++  const double targetEnergy     = (rhoE - rhoEvel) / rho;
++  const double targetEnergyVe   = rhoEve / rho;
++
++  const double closure0 = returnedEnergies[0] - targetEnergy;
++  const double closure1 = returnedEnergies[1] - targetEnergyVe;
++
++  const double closureResidual =
++      sqrt(closure0*closure0 + closure1*closure1);
++
++  const double targetNorm =
++      sqrt(targetEnergy*targetEnergy +
++           targetEnergyVe*targetEnergyVe);
++
++  const double atol = 1.0e-12;
++
++  /*
++   * This is an admissibility guard, not Mutation++'s nonlinear
++   * convergence criterion.  Allow small post-inversion roundoff
++   * while still rejecting genuinely inconsistent energy states.
++   */
++  const double rtol = 1.0e-10;
++
++  const double closureTolerance = rtol*targetNorm + atol;
++
++  if ((!std::isfinite(closureResidual)) ||
++      (closureResidual > closureTolerance)) {
++
++    std::cerr
++        << "[MPP_CLOSURE_REJECT]"
++        << " rho=" << rho
++        << " rawT=" << T
++        << " rawTve=" << Tve
++        << " targetE=" << targetEnergy
++        << " returnedE=" << returnedEnergies[0]
++        << " closure0=" << closure0
++        << " targetEve=" << targetEnergyVe
++        << " returnedEve=" << returnedEnergies[1]
++        << " closure1=" << closure1
++        << " closureResidual=" << closureResidual
++        << " targetNorm=" << targetNorm
++        << " closureTolerance=" << closureTolerance
++        << std::endl;
++
++    const su2double invalidTemperature =
++        std::numeric_limits<su2double>::quiet_NaN();
++
++    temperatures[0] = invalidTemperature;
++    temperatures[1] = invalidTemperature;
++
++    T   = invalidTemperature;
++    Tve = invalidTemperature;
++  }
++
+   return temperatures;
+ }
+ 
+diff --git a/SU2_CFD/src/fluid/CNEMOGas.cpp b/SU2_CFD/src/fluid/CNEMOGas.cpp
+index a436d46fa9..d899d31475 100644
+--- a/SU2_CFD/src/fluid/CNEMOGas.cpp
++++ b/SU2_CFD/src/fluid/CNEMOGas.cpp
+@@ -133,7 +133,7 @@ su2double CNEMOGas::ComputeGamma(){
+ 
+   /*--- Gamma Computation ---*/
+   su2double rhoR = 0.0;
+-  for(iSpecies = 0; iSpecies < nSpecies; iSpecies++)
++  for(iSpecies = nEl; iSpecies < nSpecies; iSpecies++)
+     rhoR += rhos[iSpecies]*Ru/MolarMass[iSpecies];
+ 
+   gamma = rhoR/rhoCvtr+1;
+@@ -198,7 +198,7 @@ void CNEMOGas::ComputedPdU(const su2double *V, const vector<su2double>& val_eves
+ 
+   /*--- Species density derivatives ---*/
+   su2double ef = 0.0;
+-  for (iSpecies = nEl; iSpecies < nHeavy; iSpecies++) {
++  for (iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
+     ef = Enthalpy_Formation[iSpecies] - Ru/MolarMass[iSpecies]*Ref_Temperature[iSpecies];
+     val_dPdU[iSpecies] = T*Ru/MolarMass[iSpecies] + Ru*conc/rhoCvtr *
+                          (-Cvtrs[iSpecies]*(T-Ref_Temperature[iSpecies]) -
+diff --git a/SU2_CFD/src/fluid/CSU2TCLib.cpp b/SU2_CFD/src/fluid/CSU2TCLib.cpp
+index 4f81220fac..367c56e19f 100644
+--- a/SU2_CFD/src/fluid/CSU2TCLib.cpp
++++ b/SU2_CFD/src/fluid/CSU2TCLib.cpp
+@@ -1180,7 +1180,7 @@ vector<su2double>& CSU2TCLib::GetSpeciesCvTraRot(){
+ 
+   if(ionization) Cvtrs[0] = 0.0;
+ 
+-  for (iSpecies = nEl; iSpecies < nHeavy; iSpecies++)
++  for (iSpecies = nEl; iSpecies < nSpecies; iSpecies++)
+     Cvtrs[iSpecies] = (3.0/2.0 + RotationModes[iSpecies]/2.0) * Ru/MolarMass[iSpecies];
+ 
+   return Cvtrs;
+diff --git a/SU2_CFD/src/numerics/NEMO/CNEMONumerics.cpp b/SU2_CFD/src/numerics/NEMO/CNEMONumerics.cpp
+index e7fc0f95f8..b37ae69471 100644
+--- a/SU2_CFD/src/numerics/NEMO/CNEMONumerics.cpp
++++ b/SU2_CFD/src/numerics/NEMO/CNEMONumerics.cpp
+@@ -250,12 +250,23 @@ void CNEMONumerics::GetViscousProjFlux(const su2double *val_primvar,
+   const su2double Tve = val_primvar[TVE_INDEX];
+   const auto& V   = val_primvar;
+   const auto& GV  = val_gradprimvar;
++
++  /*
++   * The non-standard primitive vector used here stores species mass
++   * fractions.  Reconstruct the partial densities before requesting
++   * state-dependent Mutation++ thermodynamic properties.
++   */
++  vector<su2double> state_rhos(nSpecies, 0.0);
++  for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies)
++    state_rhos[iSpecies] = rho * V[RHOS_INDEX+iSpecies];
++
++  fluidmodel->SetTDStateRhosTTv(state_rhos, T, Tve);
+   const auto& hs = fluidmodel->ComputeSpeciesEnthalpy(T, Tve, val_eve);
+ 
+   /*--- Pre-compute mixture quantities ---*/  //TODO
+   su2double Vector[MAXNDIM] = {0.0};
+   for (auto iDim = 0ul; iDim < nDim; iDim++) {
+-    for (auto iSpecies = 0ul; iSpecies < nHeavy; iSpecies++) {
++    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
+       Vector[iDim] += rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][iDim];
+     }
+   }
+@@ -267,7 +278,7 @@ void CNEMONumerics::GetViscousProjFlux(const su2double *val_primvar,
+   for (auto iDim = 0ul; iDim < nDim; iDim++) {
+ 
+     /*--- Species diffusion velocity ---*/
+-    for (auto iSpecies = 0ul; iSpecies < nHeavy; iSpecies++) {
++    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
+       Flux_Tensor[iSpecies][iDim] = rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][iDim]
+           - V[RHOS_INDEX+iSpecies]*Vector[iDim];
+     }
+@@ -280,7 +291,7 @@ void CNEMONumerics::GetViscousProjFlux(const su2double *val_primvar,
+     }
+ 
+     /*--- Diffusion terms ---*/
+-    for (auto iSpecies = 0ul; iSpecies < nHeavy; iSpecies++) {
++    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
+       Flux_Tensor[nSpecies+nDim][iDim]   += Flux_Tensor[iSpecies][iDim] * hs[iSpecies];
+       Flux_Tensor[nSpecies+nDim+1][iDim] += Flux_Tensor[iSpecies][iDim] * val_eve[iSpecies];
+     }
+@@ -345,6 +356,10 @@ void CNEMONumerics::GetViscousProjJacs(const su2double *val_Mean_PrimVar,
+     case 12:
+       return COMPUTE_VISCOUS_JACS(12, 7);
+ 
++    /*--- AIR-11 in 2D: 11 species + 2 momentum + 2 energy equations. ---*/
++    case 15:
++      return COMPUTE_VISCOUS_JACS(15, 11);
++
+     default:
+       return COMPUTE_VISCOUS_JACS(DynamicSize,DynamicSize);
+ 
+diff --git a/SU2_CFD/src/numerics/NEMO/NEMO_sources.cpp b/SU2_CFD/src/numerics/NEMO/NEMO_sources.cpp
+index fa2c28f078..8db917f58b 100644
+--- a/SU2_CFD/src/numerics/NEMO/NEMO_sources.cpp
++++ b/SU2_CFD/src/numerics/NEMO/NEMO_sources.cpp
+@@ -182,7 +182,15 @@ CNumerics::ResidualType<> CSource_NEMO::ComputeAxisymmetric(const CConfig *confi
+   const su2double H = V_i[H_INDEX];
+   const su2double rhoEve = U_i[nVar-1];
+   const auto& Ms = fluidmodel->GetSpeciesMolarMass();
+-  const auto& hs = fluidmodel->ComputeSpeciesEnthalpy(V_i[T_INDEX], V_i[TVE_INDEX], eve_i );
++
++  vector<su2double> state_rhos(nSpecies, 0.0);
++  for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies)
++    state_rhos[iSpecies] = V_i[RHOS_INDEX+iSpecies];
++
++  fluidmodel->SetTDStateRhosTTv(
++      state_rhos, V_i[T_INDEX], V_i[TVE_INDEX]);
++  const auto& hs =
++      fluidmodel->ComputeSpeciesEnthalpy(V_i[T_INDEX], V_i[TVE_INDEX], eve_i);
+ 
+   const bool viscous = config->GetViscous();
+   const bool rans = (config->GetKind_Turb_Model() != TURB_MODEL::NONE);
+@@ -272,7 +280,7 @@ CNumerics::ResidualType<> CSource_NEMO::ComputeAxisymmetric(const CConfig *confi
+     if (!rans){ turb_ke_i = 0.0; }
+ 
+     su2double Vector = 0.0;
+-    for (auto iSpecies = 0ul; iSpecies < nHeavy; iSpecies++)
++    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++)
+       Vector += rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][1];
+ 
+     su2double Mass = 0.0;
+@@ -290,7 +298,7 @@ CNumerics::ResidualType<> CSource_NEMO::ComputeAxisymmetric(const CConfig *confi
+     /*--- Enthalpy and vib-el energy transport due to y-direction diffusion---*/
+     su2double sumJhs_y, sumJeve_y;
+     sumJhs_y = sumJeve_y = 0.0;
+-    for (auto iSpecies = 0ul; iSpecies < nHeavy; iSpecies++) {
++    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
+       sumJhs_y  += -(rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][1] - V_i[RHOS_INDEX+iSpecies]*Vector) * hs[iSpecies];
+       sumJeve_y += -(rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][1] - V_i[RHOS_INDEX+iSpecies]*Vector) * eve_i[iSpecies];
+     }
+diff --git a/SU2_CFD/src/output/CFlowOutput.cpp b/SU2_CFD/src/output/CFlowOutput.cpp
+index b0e16fedcc..098fd2134f 100644
+--- a/SU2_CFD/src/output/CFlowOutput.cpp
++++ b/SU2_CFD/src/output/CFlowOutput.cpp
+@@ -2510,6 +2510,7 @@ void CFlowOutput::SetNearfieldInverseDesign(CSolver *solver, const CGeometry *ge
+ void CFlowOutput::WriteAdditionalFiles(CConfig *config, CGeometry *geometry, CSolver **solver_container){
+ 
+   if (config->GetFixed_CL_Mode() ||
++      config->GetAdaptive_Physical_Time() ||
+       (config->GetKind_Streamwise_Periodic() == ENUM_STREAMWISE_PERIODIC::MASSFLOW)){
+     WriteMetaData(config);
+   }
+@@ -2541,6 +2542,33 @@ void CFlowOutput::WriteMetaData(const CConfig *config){
+     else
+       meta_file <<"ITER= " << curInnerIter + config->GetExtIter_OffSet() + 1 << endl;
+ 
++    /*
++     * Adaptive physical-time restart state.
++     *
++     * Store the non-dimensional values actually used by the solver rather
++     * than recomputing them from RESTART_ITER.  Variable-step BDF2 requires
++     * the preceding physical step and the accumulated physical time.
++     */
++    if (config->GetAdaptive_Physical_Time()) {
++
++      /*
++       * Preserve enough significant decimal digits for an exact binary64
++       * round trip.  Adaptive BDF2 restart depends on reproducing the
++       * physical-step history without decimal truncation.
++       */
++      const auto old_precision = meta_file.precision();
++      meta_file.precision(17);
++
++      meta_file << "ADAPTIVE_PHYSICAL_DT_ND= "
++                << config->GetDelta_UnstTimeND() << endl;
++      meta_file << "ADAPTIVE_PREVIOUS_PHYSICAL_DT_ND= "
++                << config->GetPrevious_Delta_UnstTimeND() << endl;
++      meta_file << "ADAPTIVE_PHYSICAL_TIME_ND= "
++                << config->GetAdaptive_Physical_Time_AccumND() << endl;
++
++      meta_file.precision(old_precision);
++    }
++
+     if (config->GetFixed_CL_Mode()){
+       meta_file <<"AOA= " << config->GetAoA() - config->GetAoA_Offset() << endl;
+       meta_file <<"SIDESLIP_ANGLE= " << config->GetAoS() - config->GetAoS_Offset() << endl;
+diff --git a/SU2_CFD/src/output/CNEMOCompOutput.cpp b/SU2_CFD/src/output/CNEMOCompOutput.cpp
+index c28736296b..868cb987ad 100644
+--- a/SU2_CFD/src/output/CNEMOCompOutput.cpp
++++ b/SU2_CFD/src/output/CNEMOCompOutput.cpp
+@@ -28,6 +28,8 @@
+ #include "../../include/output/CNEMOCompOutput.hpp"
+ 
+ #include "../../../Common/include/geometry/CGeometry.hpp"
++#include "../../../Common/include/option_structure.hpp"
++#include "../../include/fluid/CNEMOGas.hpp"
+ #include "../../include/solvers/CSolver.hpp"
+ 
+ CNEMOCompOutput::CNEMOCompOutput(const CConfig *config, unsigned short nDim) : CFlowOutput(config, nDim, false) {
+@@ -229,6 +231,69 @@ void CNEMOCompOutput::SetVolumeOutputFields(CConfig *config){
+   for(iSpecies = 0; iSpecies < nSpecies; iSpecies++)
+     AddVolumeOutput("MASSFRAC_" + std::to_string(iSpecies),  "MassFrac_" + std::to_string(iSpecies),  "AUXILIARY", "MassFrac_" + std::to_string(iSpecies));
+ 
++  /*
++   * Mutation++ species number densities [1/m^3].
++   *
++   * AIR-7 ordering:
++   *   0:e-, 1:N2, 2:O2, 3:NO, 4:N, 5:O, 6:NO+
++   *
++   * AIR-11 ordering:
++   *   0:e-, 1:N+, 2:O+, 3:NO+, 4:N2+, 5:O2+,
++   *   6:N, 7:O, 8:NO, 9:N2, 10:O2.
++   */
++  const vector<string> air7NumberDensityNames = {
++      "NumberDensity_e",
++      "NumberDensity_N2",
++      "NumberDensity_O2",
++      "NumberDensity_NO",
++      "NumberDensity_N",
++      "NumberDensity_O",
++      "NumberDensity_NOplus"};
++
++  const vector<string> air11NumberDensityNames = {
++      "NumberDensity_e",
++      "NumberDensity_Nplus",
++      "NumberDensity_Oplus",
++      "NumberDensity_NOplus",
++      "NumberDensity_N2plus",
++      "NumberDensity_O2plus",
++      "NumberDensity_N",
++      "NumberDensity_O",
++      "NumberDensity_NO",
++      "NumberDensity_N2",
++      "NumberDensity_O2"};
++
++  for (iSpecies = 0; iSpecies < nSpecies; iSpecies++) {
++
++    string fieldName =
++        "NumberDensity_" + std::to_string(iSpecies);
++
++    if (nSpecies == 7)
++      fieldName = air7NumberDensityNames[iSpecies];
++    else if (nSpecies == 11)
++      fieldName = air11NumberDensityNames[iSpecies];
++
++    AddVolumeOutput(
++        "NUMBER_DENSITY_" + std::to_string(iSpecies),
++        fieldName,
++        "AUXILIARY",
++        "Species number density [1/m^3]");
++  }
++
++  /*
++   * Convenient common alias for ionized AIR-7 and AIR-11.
++   * Mutation++ places e- at species index 0 for both mixtures.
++   */
++  if (config->GetIonization() &&
++      (nSpecies == 7 || nSpecies == 11)) {
++
++    AddVolumeOutput(
++        "ELECTRON_NUMBER_DENSITY",
++        "Electron_Number_Density",
++        "AUXILIARY",
++        "Electron number density [1/m^3]");
++  }
++
+   // Grid velocity
+   if (gridMovement){
+     AddVolumeOutput("GRID_VELOCITY-X", "Grid_Velocity_x", "GRID_VELOCITY", "x-component of the grid velocity vector");
+@@ -330,6 +395,51 @@ void CNEMOCompOutput::LoadVolumeData(CConfig *config, CGeometry *geometry, CSolv
+   for(iSpecies = 0; iSpecies < nSpecies; iSpecies++)
+     SetVolumeOutputValue("MASSFRAC_" + std::to_string(iSpecies),   iPoint, Node_Flow->GetSolution(iPoint, iSpecies)/Node_Flow->GetDensity(iPoint));
+ 
++  /*
++   * Convert rho_s [kg/m^3] to number density [1/m^3].
++   *
++   * NEMO molar masses are stored in kg/kmol and AVOGAD_CONSTANT
++   * is particles/kmol, therefore:
++   *
++   *   n_s = rho_s / M_s * N_A.
++   */
++  auto* nemoFluidModel =
++      static_cast<CNEMOGas*>(
++          solver[FLOW_SOL]->GetFluidModel());
++
++  auto& MolarMass =
++      nemoFluidModel->GetSpeciesMolarMass();
++
++  for (iSpecies = 0;
++       iSpecies < nSpecies;
++       iSpecies++) {
++
++    const su2double numberDensity =
++        Node_Flow->GetSolution(iPoint, iSpecies) /
++        MolarMass[iSpecies] *
++        AVOGAD_CONSTANT;
++
++    SetVolumeOutputValue(
++        "NUMBER_DENSITY_" +
++            std::to_string(iSpecies),
++        iPoint,
++        numberDensity);
++  }
++
++  if (config->GetIonization() &&
++      (nSpecies == 7 || nSpecies == 11)) {
++
++    const su2double electronNumberDensity =
++        Node_Flow->GetSolution(iPoint, 0) /
++        MolarMass[0] *
++        AVOGAD_CONSTANT;
++
++    SetVolumeOutputValue(
++        "ELECTRON_NUMBER_DENSITY",
++        iPoint,
++        electronNumberDensity);
++  }
++
+   if (gridMovement){
+     SetVolumeOutputValue("GRID_VELOCITY-X", iPoint, Node_Geo->GetGridVel(iPoint)[0]);
+     SetVolumeOutputValue("GRID_VELOCITY-Y", iPoint, Node_Geo->GetGridVel(iPoint)[1]);
+diff --git a/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp b/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
+index b86a31b3ba..a96bc989d5 100644
+--- a/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
++++ b/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
+@@ -32,6 +32,131 @@
+ #include "../../include/fluid/CMutationTCLib.hpp"
+ #include "../../include/fluid/CSU2TCLib.hpp"
+ 
++
++#include <cmath>
++#include <fstream>
++#include <sstream>
++
++/* NEMO_ADAPTIVE_RESTART_METADATA
++ *
++ * Restore the physical-time integration state associated with the newest
++ * restart solution.  This is deliberately separate from the legacy SU2
++ * metadata reader because that reader is called before NEMO
++ * non-dimensionalization and, for second-order dual time, initially refers
++ * to the older history level.
++ */
++namespace {
++
++void ReadNEMOAdaptivePhysicalTimeMetadata(
++    CConfig *config,
++    const string& filename) {
++
++  std::ifstream meta_file(filename);
++
++  if (!meta_file.good()) {
++    SU2_MPI::Error(
++        "Adaptive physical-time restart requires metadata file '" +
++        filename + "'.",
++        CURRENT_FUNCTION);
++  }
++
++  su2double current_dt = 0.0;
++  su2double previous_dt = 0.0;
++  su2double physical_time = 0.0;
++
++  bool found_current_dt = false;
++  bool found_previous_dt = false;
++  bool found_physical_time = false;
++
++  const string current_key =
++      "ADAPTIVE_PHYSICAL_DT_ND=";
++  const string previous_key =
++      "ADAPTIVE_PREVIOUS_PHYSICAL_DT_ND=";
++  const string time_key =
++      "ADAPTIVE_PHYSICAL_TIME_ND=";
++
++  string line;
++
++  while (std::getline(meta_file, line)) {
++
++    auto read_value =
++        [&](const string& key,
++            su2double& value,
++            bool& found) {
++
++      const auto pos = line.find(key);
++
++      if (pos == string::npos)
++        return;
++
++      std::stringstream value_stream(
++          line.substr(pos + key.size()));
++
++      value_stream >> value;
++
++      if (!value_stream.fail())
++        found = true;
++    };
++
++    read_value(current_key,
++               current_dt,
++               found_current_dt);
++
++    read_value(previous_key,
++               previous_dt,
++               found_previous_dt);
++
++    read_value(time_key,
++               physical_time,
++               found_physical_time);
++  }
++
++  meta_file.close();
++
++  if (!found_current_dt ||
++      !found_previous_dt ||
++      !found_physical_time) {
++
++    SU2_MPI::Error(
++        "Adaptive physical-time metadata is incomplete in '" +
++        filename + "'.",
++        CURRENT_FUNCTION);
++  }
++
++  const bool second_order =
++      config->GetTime_Marching() ==
++      TIME_MARCHING::DT_STEPPING_2ND;
++
++  if (!std::isfinite(current_dt) ||
++      !std::isfinite(previous_dt) ||
++      !std::isfinite(physical_time) ||
++      current_dt <= 0.0 ||
++      physical_time < 0.0 ||
++      (second_order && previous_dt <= 0.0)) {
++
++    SU2_MPI::Error(
++        "Invalid adaptive physical-time restart state in '" +
++        filename + "'.",
++        CURRENT_FUNCTION);
++  }
++
++  config->SetDelta_UnstTimeND(current_dt);
++  config->SetPrevious_Delta_UnstTimeND(previous_dt);
++  config->SetAdaptive_Physical_Time_AccumND(physical_time);
++  config->SetPhysicalTime(physical_time);
++
++  if (SU2_MPI::GetRank() == MASTER_NODE) {
++    cout << "[NEMO_ADAPTIVE_RESTART]"
++         << " dt=" << current_dt
++         << " previous_dt=" << previous_dt
++         << " physical_time=" << physical_time
++         << endl;
++  }
++}
++
++}  // namespace
++
++
+ CNEMOEulerSolver::CNEMOEulerSolver(CGeometry *geometry, CConfig *config,
+                            unsigned short iMesh, const bool navier_stokes) :
+   CFVMFlowSolverBase<CNEMOEulerVariable, ENUM_REGIME::COMPRESSIBLE>(*geometry, *config) {
+@@ -120,6 +245,45 @@ CNEMOEulerSolver::CNEMOEulerSolver(CGeometry *geometry, CConfig *config,
+     specified reference values. ---*/
+   SetNondimensionalization(config, iMesh);
+ 
++
++  /*
++   * Restore the adaptive physical-time state from the newest restart level.
++   *
++   * For BDF2 SU2 first uses RESTART_ITER-2 as the older history solution
++   * and subsequently loads RESTART_ITER-1 as the newest state.  The time
++   * integration metadata must therefore come from RESTART_ITER-1.
++   *
++   * This restoration is intentionally performed after NEMO
++   * non-dimensionalization because SetNondimensionalization() initializes
++   * Delta_UnstTimeND from the dimensional TIME_STEP.
++   */
++  if (restart &&
++      config->GetAdaptive_Physical_Time() &&
++      (iMesh == MESH_0) &&
++      (nZone <= 1)) {
++
++    if (config->GetRestart_Iter() == 0) {
++      SU2_MPI::Error(
++          "Adaptive physical-time restart requires RESTART_ITER > 0.",
++          CURRENT_FUNCTION);
++    }
++
++    const int adaptive_restart_iter =
++        SU2_TYPE::Int(config->GetRestart_Iter()) - 1;
++
++    string adaptive_meta_filename = "flow";
++
++    adaptive_meta_filename =
++        config->GetFilename(
++            adaptive_meta_filename,
++            ".meta",
++            adaptive_restart_iter);
++
++    ReadNEMOAdaptivePhysicalTimeMetadata(
++        config,
++        adaptive_meta_filename);
++  }
++
+   /// TODO: This type of variables will be replaced.
+ 
+   AllocateTerribleLegacyTemporaryVariables();
+@@ -570,9 +734,58 @@ void CNEMOEulerSolver::Upwind_Residual(CGeometry *geometry, CSolver **solver_con
+       }
+       su2double lim_ij = min(lim_i, lim_j);
+ 
++      /*
++       * Positivity-preserving scaling for NEMO species reconstruction.
++       *
++       * A physically admissible cell-centred state may contain species with
++       * exactly zero partial density.  Standard MUSCL reconstruction can then
++       * produce a small negative face value even when the underlying state is
++       * valid.  Instead of immediately rejecting the complete reconstructed
++       * state, scale each face reconstruction toward its cell-centred state
++       * until all reconstructed species partial densities are non-negative.
++       *
++       * The same scaling is applied to every reconstructed primitive variable
++       * on a given side of the face, preserving the reconstruction direction
++       * in primitive-variable space.  CheckNonPhys() below remains the final
++       * safeguard for pressure, temperatures, sound speed, non-finite values,
++       * and any remaining non-physical state.
++       */
++      su2double theta_i = 1.0;
++      su2double theta_j = 1.0;
++
++      const unsigned short RHOS_INDEX = nodes->GetRhosIndex();
++      constexpr su2double positivity_safety = 1.0 - 1.0e-12;
++
++      for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {
++
++        const auto iVar = RHOS_INDEX + iSpecies;
++
++        const su2double delta_i =
++            0.5 * lim_ij * Project_Grad_i[iVar];
++        const su2double delta_j =
++           -0.5 * lim_ij * Project_Grad_j[iVar];
++
++        if ((V_i[iVar] + delta_i < 0.0) && (delta_i < 0.0)) {
++          const su2double theta_species =
++              positivity_safety * V_i[iVar] / (-delta_i);
++          theta_i = min(theta_i, max(0.0, theta_species));
++        }
++
++        if ((V_j[iVar] + delta_j < 0.0) && (delta_j < 0.0)) {
++          const su2double theta_species =
++              positivity_safety * V_j[iVar] / (-delta_j);
++          theta_j = min(theta_j, max(0.0, theta_species));
++        }
++      }
++
+       for (auto iVar = 0ul; iVar < nPrimVarGrad; iVar++) {
+-        Primitive_i[iVar] = V_i[iVar] + 0.5 * lim_ij * Project_Grad_i[iVar];
+-        Primitive_j[iVar] = V_j[iVar] - 0.5 * lim_ij * Project_Grad_j[iVar];
++        Primitive_i[iVar] =
++            V_i[iVar] +
++            theta_i * 0.5 * lim_ij * Project_Grad_i[iVar];
++
++        Primitive_j[iVar] =
++            V_j[iVar] -
++            theta_j * 0.5 * lim_ij * Project_Grad_j[iVar];
+       }
+ 
+       /*--- Check for non-physical solutions after reconstruction. If found, use the
+@@ -737,15 +950,23 @@ bool CNEMOEulerSolver::CheckNonPhys(const su2double *V) const {
+ 
+   /*--- Check whether state makes sense ---*/
+   for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++)
+-    if (V[RHOS_INDEX+iSpecies] < 0.0) nonPhys = true;
++    if (!std::isfinite(V[RHOS_INDEX+iSpecies]) ||
++        V[RHOS_INDEX+iSpecies] < 0.0)
++      nonPhys = true;
+ 
+-  if (V[P_INDEX] < 0.0) nonPhys = true;
++  if (!std::isfinite(V[P_INDEX]) || V[P_INDEX] < 0.0)
++    nonPhys = true;
+ 
+-  if (V[T_INDEX] < Tmin || V[T_INDEX] > Tmax) nonPhys = true;
++  if (!std::isfinite(V[T_INDEX]) ||
++      V[T_INDEX] < Tmin || V[T_INDEX] > Tmax)
++    nonPhys = true;
+ 
+-  if (V[TVE_INDEX] < Tvemin || V[TVE_INDEX] > Tvemax) nonPhys = true;
++  if (!std::isfinite(V[TVE_INDEX]) ||
++      V[TVE_INDEX] < Tvemin || V[TVE_INDEX] > Tvemax)
++    nonPhys = true;
+ 
+-  if (V[A_INDEX] < 0.0 ) nonPhys = true;
++  if (!std::isfinite(V[A_INDEX]) || V[A_INDEX] < 0.0)
++    nonPhys = true;
+ 
+   return nonPhys;
+ 
+@@ -806,6 +1027,7 @@ void CNEMOEulerSolver::Source_Residual(CGeometry *geometry, CSolver **solver_con
+         /*--- Compute the non-equilibrium chemistry ---*/
+         auto residual = numerics->ComputeChemistry(config);
+ 
++
+         /*--- Check for errors before applying source to the linear system ---*/
+         err = CNumerics::CheckResidualNaNs(implicit, nVar, residual);
+ 
+@@ -939,6 +1161,16 @@ void CNEMOEulerSolver::PrepareImplicitIteration(CGeometry *geometry, CSolver**,
+ void CNEMOEulerSolver::CompleteImplicitIteration(CGeometry *geometry, CSolver**, CConfig *config) {
+   SU2_ZONE_SCOPED
+ 
++  /*
++   * Apply the standard NEMO conservative update limiter before the
++   * generic implicit solution update.  Thermochemical recovery is
++   * performed lazily by SetPrimVar() only for candidates that actually
++   * fail conservative-to-primitive conversion.
++   *
++   * Do not run Mutation++ conservative-to-primitive inversion for every
++   * grid point here: that serial all-point preflight dominates runtime
++   * for AIR-7/AIR-11 and duplicates SetPrimVar() recovery.
++   */
+   CompleteImplicitIteration_impl<true>(geometry, config);
+ }
+ 
+@@ -967,19 +1199,23 @@ void CNEMOEulerSolver::ComputeUnderRelaxationFactor(const CConfig *config) {
+         denom += fabs(nodes->GetSolution(iPoint, iVar));
+ 
+         /*--- If final density/species, compute Under-relaxation ---*/
+-        if (iVar == (config ->GetnSpecies()-1)){
+-          su2double ratio = (num/(denom+EPS));
++        if (iVar == (config->GetnSpecies()-1)) {
++          const su2double ratio = num/(denom+EPS);
+           if (ratio > allowableRatio) {
+             localUnderRelaxation = min(allowableRatio / ratio, localUnderRelaxation);
+           }
+         }
++      }
+ 
+-        /*--- Energy ---*/
+-        if (iVar == (nVar-2)){
+-          su2double ratio = fabs(LinSysSol[index]) / (fabs(nodes->GetSolution(iPoint, iVar)) + EPS);
+-          if (ratio > allowableRatio) {
+-            localUnderRelaxation = min(allowableRatio / ratio, localUnderRelaxation);
+-          }
++      /*--- Total energy rhoE. This must be outside the species block. ---*/
++      if (iVar == (nVar-2)) {
++        const su2double ratio =
++            fabs(LinSysSol[index]) /
++            (fabs(nodes->GetSolution(iPoint, iVar)) + EPS);
++
++        if (ratio > allowableRatio) {
++          localUnderRelaxation =
++              min(allowableRatio / ratio, localUnderRelaxation);
+         }
+       }
+     }
+diff --git a/SU2_CFD/src/solvers/CNEMONSSolver.cpp b/SU2_CFD/src/solvers/CNEMONSSolver.cpp
+index 4ad43f4c09..60276617f0 100644
+--- a/SU2_CFD/src/solvers/CNEMONSSolver.cpp
++++ b/SU2_CFD/src/solvers/CNEMONSSolver.cpp
+@@ -537,13 +537,8 @@ void CNEMONSSolver::BC_IsothermalNonCatalytic_Wall(CGeometry *geometry,
+   SU2_ZONE_SCOPED
+ 
+   const bool implicit = (config->GetKind_TimeIntScheme() == EULER_IMPLICIT);
+-  const bool ionization = config->GetIonization();
+   su2double UnitNormal[MAXNDIM] = {0.0};
+ 
+-  if (ionization) {
+-    SU2_MPI::Error("NEED TO TAKE A CLOSER LOOK AT THE JACOBIAN W/ IONIZATION",CURRENT_FUNCTION);
+-  }
+-
+   /*--- Define 'proportional control' constant ---*/
+   const su2double C = 5;
+ 
+@@ -623,10 +618,13 @@ void CNEMONSSolver::BC_IsothermalNonCatalytic_Wall(CGeometry *geometry,
+       const auto dTvedU = nodes->GetdTvedU(iPoint);
+       const su2double theta = GeometryToolbox::SquaredNorm(nDim, UnitNormal);
+ 
++      const su2double weak_factor = 1.0 - C;
+       for (auto iVar = 0ul; iVar < nVar; iVar++) {
+-        Jacobian_i[nSpecies+nDim][iVar]   = -(ktr*theta/dist_ij*dTdU[iVar] +
+-                                              kve*theta/dist_ij*dTvedU[iVar])*Area;
+-        Jacobian_i[nSpecies+nDim+1][iVar] = - kve*theta/dist_ij*dTvedU[iVar]*Area;
++        Jacobian_i[nSpecies+nDim][iVar] =
++            weak_factor*(ktr*theta*dTdU[iVar] +
++                         kve*theta*dTvedU[iVar])*Area/dist_ij;
++        Jacobian_i[nSpecies+nDim+1][iVar] =
++            weak_factor*kve*theta*dTvedU[iVar]*Area/dist_ij;
+       }
+     } // implicit
+ 
+@@ -639,7 +637,7 @@ void CNEMONSSolver::BC_IsothermalNonCatalytic_Wall(CGeometry *geometry,
+     if (implicit) {
+       Jacobian.SubtractBlock2Diag(iPoint, Jacobian_i);
+ 
+-      for (auto iVar = 1u; iVar <= nDim; iVar++) {
++      for (auto iVar = nSpecies; iVar < nSpecies+nDim; iVar++) {
+         Jacobian.DeleteValsRowi(iPoint, iVar);
+       }
+     }
+@@ -803,10 +801,6 @@ void CNEMONSSolver::BC_IsothermalCatalytic_Wall(CGeometry *geometry,
+ 
+       } else {
+ 
+-        if (implicit) {
+-          SU2_MPI::Error("Implicit not currently available for partially catalytic wall.",CURRENT_FUNCTION);
+-        }
+-
+         /*--- Identify the boundary ---*/
+         string Marker_Tag = config->GetMarker_All_TagBound(val_marker);
+ 
+@@ -820,7 +814,7 @@ void CNEMONSSolver::BC_IsothermalCatalytic_Wall(CGeometry *geometry,
+         const auto& RxnTable = FluidModel->GetCatalyticRecombination();
+ 
+         /*--- Common catalytic flux factor ---*/
+-        const su2double factor = gam*rho*sqrt(RuSI*Tw/2/PI_NUMBER)*Area;
++        const su2double factor = gam*rho*sqrt(Ru*Tw/2/PI_NUMBER)*Area;
+ 
+         /*--- Compute catalytic recombination flux ---*/
+         // Ref: 10.2514/6.2022-1636
+@@ -829,11 +823,158 @@ void CNEMONSSolver::BC_IsothermalCatalytic_Wall(CGeometry *geometry,
+           int Index = SU2_TYPE::Int(RxnTable(iSpecies,1));
+           Res_Visc[iSpecies] = RxnTable(iSpecies,0)*factor*Vi[Index]/Vi[RHO_INDEX]*sqrt(1/Ms[Index]);
+         }
++
++        if (implicit) {
++          /*--- The partial-catalytic species flux can be written directly in
++           * conservative variables because rho*Y_index = rho_index:
++           *   w_s = a_s*gam*sqrt(Ru*Tw/(2*pi*M_index))*rho_index*Area.
++           * Hence its species Jacobian is sparse and exact. ---*/
++          for (auto iVar = 0ul; iVar < nVar; iVar++)
++            for (auto jVar = 0ul; jVar < nVar; jVar++)
++              Jacobian_i[iVar][jVar] = 0.0;
++
++          for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {
++            const auto Index = SU2_TYPE::Int(RxnTable(iSpecies,1));
++            Jacobian_i[iSpecies][Index] = RxnTable(iSpecies,0)*gam*
++                sqrt(Ru*Tw/(2.0*PI_NUMBER*Ms[Index]))*Area;
++          }
++
++          /*
++           * Mutation++'s ChemNonEqTTv state inversion is a coupled
++           * two-energy problem.  Build the local 2x2 thermodynamic
++           * linearization directly from the same species enthalpy and
++           * V-E energy functions used by the residual instead of relying
++           * on the generic SU2 temperature derivatives.
++           */
++          vector<su2double> state_rhos(nSpecies, 0.0);
++          for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies)
++            state_rhos[iSpecies] = Vi[RHOS_INDEX+iSpecies];
++
++          const su2double T0 = Vi[T_INDEX];
++          const su2double Tve0 = Vi[TVE_INDEX];
++          const su2double rel_step = 2.0e-6;
++          const su2double dT = rel_step*max(abs(T0), su2double(1.0));
++          const su2double dTve = rel_step*max(abs(Tve0), su2double(1.0));
++
++          vector<su2double> h0(nSpecies, 0.0), eve0(nSpecies, 0.0);
++          vector<su2double> hTp(nSpecies, 0.0), hTm(nSpecies, 0.0);
++          vector<su2double> hVp(nSpecies, 0.0), hVm(nSpecies, 0.0);
++          vector<su2double> eTp(nSpecies, 0.0), eTm(nSpecies, 0.0);
++          vector<su2double> eVp(nSpecies, 0.0), eVm(nSpecies, 0.0);
++
++          auto sample_thermo = [&](su2double Ts, su2double Tves,
++                                   vector<su2double>& hout,
++                                   vector<su2double>& eout) {
++            FluidModel->SetTDStateRhosTTv(state_rhos, Ts, Tves);
++            const auto& eref = FluidModel->ComputeSpeciesEve(Tves);
++            for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies)
++              eout[iSpecies] = eref[iSpecies];
++            const auto& href =
++                FluidModel->ComputeSpeciesEnthalpy(Ts, Tves, eout.data());
++            for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies)
++              hout[iSpecies] = href[iSpecies];
++          };
++
++          sample_thermo(T0, Tve0, h0, eve0);
++          sample_thermo(T0+dT, Tve0, hTp, eTp);
++          sample_thermo(T0-dT, Tve0, hTm, eTm);
++          sample_thermo(T0, Tve0+dTve, hVp, eVp);
++          sample_thermo(T0, Tve0-dTve, hVm, eVm);
++
++          vector<su2double> dhdT(nSpecies, 0.0), dhdTve(nSpecies, 0.0);
++          vector<su2double> dedT(nSpecies, 0.0), dedTve(nSpecies, 0.0);
++          vector<su2double> eTotal(nSpecies, 0.0);
++          vector<su2double> deTotaldT(nSpecies, 0.0), deTotaldTve(nSpecies, 0.0);
++
++          su2double A = 0.0, B = 0.0, C = 0.0, D = 0.0;
++
++          for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies) {
++            dhdT[iSpecies] = (hTp[iSpecies]-hTm[iSpecies])/(2.0*dT);
++            dhdTve[iSpecies] = (hVp[iSpecies]-hVm[iSpecies])/(2.0*dTve);
++            dedT[iSpecies] = (eTp[iSpecies]-eTm[iSpecies])/(2.0*dT);
++            dedTve[iSpecies] = (eVp[iSpecies]-eVm[iSpecies])/(2.0*dTve);
++
++            const bool electron = config->GetIonization() && (iSpecies == 0);
++            const su2double species_temperature = electron ? Tve0 : T0;
++
++            eTotal[iSpecies] =
++                h0[iSpecies] - Ru/Ms[iSpecies]*species_temperature;
++
++            deTotaldT[iSpecies] =
++                dhdT[iSpecies] - (electron ? 0.0 : Ru/Ms[iSpecies]);
++
++            deTotaldTve[iSpecies] =
++                dhdTve[iSpecies] - (electron ? Ru/Ms[iSpecies] : 0.0);
++
++            A += state_rhos[iSpecies]*deTotaldT[iSpecies];
++            B += state_rhos[iSpecies]*deTotaldTve[iSpecies];
++            C += state_rhos[iSpecies]*dedT[iSpecies];
++            D += state_rhos[iSpecies]*dedTve[iSpecies];
++          }
++
++          const su2double det = A*D-B*C;
++          const su2double det_scale =
++              max(su2double(1.0), max(abs(A*D), abs(B*C)));
++
++          if ((!std::isfinite(det)) || (abs(det) <= 1.0e-14*det_scale))
++            SU2_MPI::Error("Singular thermodynamic Jacobian at partially catalytic wall.",
++                           CURRENT_FUNCTION);
++
++          vector<su2double> wall_dTdU(nVar, 0.0);
++          vector<su2double> wall_dTvedU(nVar, 0.0);
++
++          su2double velocity2 = 0.0;
++          for (auto iDim = 0ul; iDim < nDim; ++iDim)
++            velocity2 += nodes->GetVelocity(iPoint,iDim)*nodes->GetVelocity(iPoint,iDim);
++
++          for (auto jVar = 0ul; jVar < nVar; ++jVar) {
++            su2double rhs0 = 0.0;
++            su2double rhs1 = 0.0;
++
++            if (jVar < nSpecies) {
++              rhs0 = 0.5*velocity2 - eTotal[jVar];
++              rhs1 = -eve0[jVar];
++            } else if (jVar < nSpecies+nDim) {
++              const auto iDim = jVar-nSpecies;
++              rhs0 = -nodes->GetVelocity(iPoint,iDim);
++            } else if (jVar == nSpecies+nDim) {
++              rhs0 = 1.0;
++            } else if (jVar == nSpecies+nDim+1) {
++              rhs1 = 1.0;
++            }
++
++            wall_dTdU[jVar] = (rhs0*D-B*rhs1)/det;
++            wall_dTvedU[jVar] = (A*rhs1-C*rhs0)/det;
++          }
++
++          for (auto jVar = 0ul; jVar < nVar; ++jVar) {
++            for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies) {
++              Jacobian_i[nSpecies+nDim][jVar] +=
++                  h0[iSpecies]*Jacobian_i[iSpecies][jVar] +
++                  Res_Visc[iSpecies]*
++                      (dhdT[iSpecies]*wall_dTdU[jVar] +
++                       dhdTve[iSpecies]*wall_dTvedU[jVar]);
++
++              Jacobian_i[nSpecies+nDim+1][jVar] +=
++                  eve0[iSpecies]*Jacobian_i[iSpecies][jVar] +
++                  Res_Visc[iSpecies]*
++                      (dedT[iSpecies]*wall_dTdU[jVar] +
++                       dedTve[iSpecies]*wall_dTvedU[jVar]);
++            }
++          }
++
++          /*--- Restore the Mutation++ state and its species-enthalpy buffer. ---*/
++          FluidModel->SetTDStateRhosTTv(state_rhos, T0, Tve0);
++          FluidModel->ComputeSpeciesEnthalpy(T0, Tve0, eves);
++
++          /*--- Apply the catalytic-wall contribution to the linear system. ---*/
++          Jacobian.SubtractBlock(iPoint, iPoint, Jacobian_i);
++        }
+       }
+ 
+       for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {
+-        Res_Visc[nSpecies+nDim]   += (Res_Visc[iSpecies]*hs[iSpecies])*Area;
+-        Res_Visc[nSpecies+nDim+1] += (Res_Visc[iSpecies]*eves[iSpecies])*Area;
++        Res_Visc[nSpecies+nDim]   += Res_Visc[iSpecies]*hs[iSpecies];
++        Res_Visc[nSpecies+nDim+1] += Res_Visc[iSpecies]*eves[iSpecies];
+       }
+ 
+       /*--- Viscous contribution to the residual at the wall ---*/
+diff --git a/SU2_CFD/src/variables/CNEMOEulerVariable.cpp b/SU2_CFD/src/variables/CNEMOEulerVariable.cpp
+index 79ba53bfc4..7719a741f7 100644
+--- a/SU2_CFD/src/variables/CNEMOEulerVariable.cpp
++++ b/SU2_CFD/src/variables/CNEMOEulerVariable.cpp
+@@ -86,9 +86,9 @@ CNEMOEulerVariable::CNEMOEulerVariable(su2double val_pressure,
+   dPdU.resize(nPoint, nVar)      = su2double(0.0);
+   dTdU.resize(nPoint, nVar)      = su2double(0.0);
+   dTvedU.resize(nPoint, nVar)    = su2double(0.0);
+-  Cvves.resize(nPoint, nSpecies) = su2double(0.0);
+-  eves.resize(nPoint, nSpecies)  = su2double(0.0);
+-  Gamma.resize(nPoint)           = su2double(0.0);
++  Cvves.resize(nPoint, nSpecies)      = su2double(0.0);
++  eves.resize(nPoint, nSpecies)       = su2double(0.0);
++  Gamma.resize(nPoint)                = su2double(0.0);
+ 
+   /*--- Set mixture state ---*/
+   fluidmodel->SetTDStatePTTv(val_pressure, val_massfrac, val_temperature, val_temperature_ve);
+@@ -114,6 +114,14 @@ CNEMOEulerVariable::CNEMOEulerVariable(su2double val_pressure,
+ 
+   Solution_Old = Solution;
+ 
++  /*
++   * The constructor state is generated directly from a thermodynamic
++   * PT-Tve state and is therefore the initial last-known admissible
++   * conservative state.
++   */
++  Solution_Accepted.resize(nPoint, nVar);
++  Solution_Accepted = Solution;
++
+   if (classical_rk4) Solution_New = Solution;
+ 
+   /*--- Allocate and initializate solution for dual time strategy ---*/
+@@ -139,22 +147,122 @@ void CNEMOEulerVariable::SetVelocity2(unsigned long iPoint) {
+ 
+ bool CNEMOEulerVariable::SetPrimVar(unsigned long iPoint, CFluidModel *FluidModel) {
+ 
+-  unsigned short iVar;
+-
+   fluidmodel = static_cast<CNEMOGas*>(FluidModel);
+ 
+-  /*--- Convert conserved to primitive variables ---*/
+-  bool nonPhys = Cons2PrimVar(Solution[iPoint], Primitive[iPoint],
+-                              dPdU[iPoint], dTdU[iPoint], dTvedU[iPoint], eves[iPoint], Cvves[iPoint]);
++  su2double candidateState[MAXNVAR];
++  for (auto iVar = 0u; iVar < nVar; ++iVar)
++    candidateState[iVar] = Solution(iPoint,iVar);
++
++  const su2double TSeed =
++      Primitive(iPoint,T_INDEX);
++  const su2double TveSeed =
++      Primitive(iPoint,TVE_INDEX);
++
++  const bool candidateNonPhys =
++      Cons2PrimVar(
++          Solution[iPoint],
++          Primitive[iPoint],
++          dPdU[iPoint],
++          dTdU[iPoint],
++          dTvedU[iPoint],
++          eves[iPoint],
++          Cvves[iPoint]);
++
++  bool storedStateNonPhys = candidateNonPhys;
++
++  /*
++   * Use the same thermochemical accepted-state recovery policy as the
++   * Navier--Stokes variable path instead of falling back to Solution_Old,
++   * which is an integration buffer and is not an admissibility record.
++   */
++  if (candidateNonPhys) {
++
++    bool recovered = false;
++    su2double alpha = 0.5;
++
++    constexpr unsigned short maxBacktrack = 16;
++
++    for (unsigned short iTry = 0;
++         iTry < maxBacktrack;
++         ++iTry) {
++
++      for (auto iVar = 0u; iVar < nVar; ++iVar) {
++        Solution(iPoint,iVar) =
++            Solution_Accepted(iPoint,iVar)
++            + alpha
++            * (candidateState[iVar]
++               - Solution_Accepted(iPoint,iVar));
++      }
++
++      Primitive(iPoint,T_INDEX)   = TSeed;
++      Primitive(iPoint,TVE_INDEX) = TveSeed;
++
++      const bool trialNonPhys =
++          Cons2PrimVar(
++              Solution[iPoint],
++              Primitive[iPoint],
++              dPdU[iPoint],
++              dTdU[iPoint],
++              dTvedU[iPoint],
++              eves[iPoint],
++              Cvves[iPoint]);
++
++      if (!trialNonPhys) {
++        recovered = true;
++        break;
++      }
++
++      alpha *= 0.5;
++    }
++
++    if (recovered) {
++
++      storedStateNonPhys = false;
++
++    } else {
+ 
+-  /*--- Reset solution to previous one, if nonphys ---*/
+-  if (nonPhys) {
+-    for (iVar = 0; iVar < nVar; iVar++)
+-      Solution(iPoint,iVar) = Solution_Old(iPoint,iVar);
++      for (auto iVar = 0u; iVar < nVar; ++iVar)
++        Solution(iPoint,iVar) =
++            Solution_Accepted(iPoint,iVar);
++
++      Primitive(iPoint,T_INDEX)   = TSeed;
++      Primitive(iPoint,TVE_INDEX) = TveSeed;
++
++      const bool acceptedNonPhys =
++          Cons2PrimVar(
++              Solution[iPoint],
++              Primitive[iPoint],
++              dPdU[iPoint],
++              dTdU[iPoint],
++              dTvedU[iPoint],
++              eves[iPoint],
++              Cvves[iPoint]);
++
++      if (acceptedNonPhys) {
++        std::cerr
++            << "[NEMO_EULER_ACCEPTED_STATE_FAILURE]"
++            << " point=" << iPoint
++            << " rhoE_accepted="
++            << Solution_Accepted(iPoint,nSpecies+nDim)
++            << " rhoEve_accepted="
++            << Solution_Accepted(iPoint,nSpecies+nDim+1)
++            << " T=" << Primitive(iPoint,T_INDEX)
++            << " Tve=" << Primitive(iPoint,TVE_INDEX)
++            << std::endl;
++
++        SU2_MPI::Error(
++            "NEMO Euler last-accepted thermochemical state failed "
++            "conservative-to-primitive recovery.",
++            CURRENT_FUNCTION);
++      }
++
++      storedStateNonPhys = false;
++    }
++  }
+ 
+-    /*--- Recompute Primitive from previous solution ---*/
+-    Cons2PrimVar(Solution[iPoint], Primitive[iPoint],
+-                   dPdU[iPoint], dTdU[iPoint], dTvedU[iPoint], eves[iPoint], Cvves[iPoint]);
++  if (!storedStateNonPhys) {
++    for (auto iVar = 0u; iVar < nVar; ++iVar)
++      Solution_Accepted(iPoint,iVar) = Solution(iPoint,iVar);
+   }
+ 
+   /*--- Set additional point quantities ---*/
+@@ -162,9 +270,114 @@ bool CNEMOEulerVariable::SetPrimVar(unsigned long iPoint, CFluidModel *FluidMode
+ 
+   SetVelocity2(iPoint);
+ 
+-  return nonPhys;
++  return candidateNonPhys;
++}
++
++
++su2double CNEMOEulerVariable::ComputeAdmissibleImplicitStep(
++    unsigned long iPoint,
++    const su2double *deltaU,
++    su2double initial_alpha,
++    CFluidModel *FluidModel,
++    unsigned short max_backtracks) {
++
++  if (initial_alpha <= 0.0) return 0.0;
++
++  /*
++   * Trial buffers are completely local.  In particular, Cons2PrimVar()
++   * is allowed to floor a trace negative species in Utrial without
++   * changing the live conservative solution stored in Solution.
++   */
++  std::vector<su2double> Utrial(nVar, 0.0);
++  std::vector<su2double> Vtrial(nSpecies + nDim + 10, 0.0);
++
++  std::vector<su2double> dPdU(nVar, 0.0);
++  std::vector<su2double> dTdU(nVar, 0.0);
++  std::vector<su2double> dTvedU(nVar, 0.0);
++
++  std::vector<su2double> eves(nSpecies, 0.0);
++  std::vector<su2double> Cvves(nSpecies, 0.0);
++
++  const su2double TSeed = Primitive(iPoint, T_INDEX);
++  const su2double TveSeed = Primitive(iPoint, TVE_INDEX);
++
++  /*
++   * Keep an exact copy of the currently accepted thermochemical state.
++   * Mutation++ ComputeTemperatures() changes the internal mixture state
++   * even when the energy inversion is later rejected, so every trial
++   * must begin from this same accepted state.
++   */
++  std::vector<su2double> live_rhos(nSpecies, 0.0);
++  for (unsigned short iSpecies = 0; iSpecies < nSpecies; ++iSpecies)
++    live_rhos[iSpecies] = Solution(iPoint, iSpecies);
++
++  auto restoreFluidState = [&]() {
++    fluidmodel->SetTDStateRhosTTv(live_rhos, TSeed, TveSeed);
++  };
++
++  restoreFluidState();
++
++  su2double alpha = initial_alpha;
++
++  /*
++   * Attempt initial_alpha first, followed by max_backtracks halvings.
++   * Thus max_backtracks = 0 still tests the original step once.
++   */
++  for (unsigned short attempt = 0;
++       attempt <= max_backtracks;
++       ++attempt) {
++
++    for (unsigned short iVar = 0; iVar < nVar; ++iVar) {
++      Utrial[iVar] =
++          Solution(iPoint, iVar) +
++          alpha * deltaU[iVar];
++    }
++
++    /*
++     * Every attempt must start from the same valid temperature seeds.
++     * A failed Mutation++ inversion must not poison the next trial.
++     */
++    std::fill(Vtrial.begin(), Vtrial.end(), 0.0);
++    Vtrial[T_INDEX] = TSeed;
++    Vtrial[TVE_INDEX] = TveSeed;
++
++    /*
++     * ComputeTemperatures() mutates Mutation++'s internal mixture state.
++     * Start every independent trial from the exact accepted state.
++     */
++    restoreFluidState();
++
++    const bool nonphysical =
++        Cons2PrimVar(
++            Utrial.data(),
++            Vtrial.data(),
++            dPdU.data(),
++            dTdU.data(),
++            dTvedU.data(),
++            eves.data(),
++            Cvves.data());
++
++    /*
++     * Whether this trial succeeds or fails, do not leak its Mutation++
++     * state into the next trial or back to the caller.
++     */
++    restoreFluidState();
++
++    if (!nonphysical &&
++        std::isfinite(Vtrial[T_INDEX]) &&
++        std::isfinite(Vtrial[TVE_INDEX]) &&
++        Vtrial[T_INDEX] > 0.0 &&
++        Vtrial[TVE_INDEX] > 0.0) {
++      return alpha;
++    }
++
++    alpha *= 0.5;
++  }
++
++  return 0.0;
+ }
+ 
++
+ bool CNEMOEulerVariable::Cons2PrimVar(su2double *U, su2double *V,
+                                       su2double *val_dPdU, su2double *val_dTdU,
+                                       su2double *val_dTvedU, su2double *val_eves,
+@@ -191,21 +404,27 @@ bool CNEMOEulerVariable::Cons2PrimVar(su2double *U, su2double *V,
+   su2double rhoE   = U[nSpecies+nDim];     // Density * energy [J/m3]
+   su2double rhoEve = U[nSpecies+nDim+1];   // Density * energy_ve [J/m3]
+ 
+-  /*--- Assign species & mixture density ---*/
+-  // Note: if any species densities are < 0, these values are re-assigned
+-  //       in the primitive AND conserved vectors to ensure positive density
++  /*--- Assign species & mixture density.
++   *
++   * Preserve the original NEMO treatment of an individual species
++   * undershoot: floor only that species instead of rejecting the
++   * complete conservative state.  This is important for trace charged
++   * species in AIR-11.
++   *---*/
+   V[RHO_INDEX] = 0.0;
+-  for (iSpecies = 0; iSpecies < nSpecies; iSpecies++) {
++
++  for (iSpecies = 0; iSpecies < nSpecies; ++iSpecies) {
++
+     if (U[iSpecies] < 0.0) {
+-      U[iSpecies]            = 1E-20;
++      U[iSpecies] = 1E-20;
+       V[RHOS_INDEX+iSpecies] = 1E-20;
+-      rhos[iSpecies]         = 1E-20;
+-    //nonPhys                = true;
++      rhos[iSpecies] = 1E-20;
+     } else {
+       V[RHOS_INDEX+iSpecies] = U[iSpecies];
+-      rhos[iSpecies]         = U[iSpecies];
++      rhos[iSpecies] = U[iSpecies];
+     }
+-    V[RHO_INDEX]            += U[iSpecies];
++
++    V[RHO_INDEX] += U[iSpecies];
+   }
+ 
+   // Rename for convenience
+diff --git a/SU2_CFD/src/variables/CNEMONSVariable.cpp b/SU2_CFD/src/variables/CNEMONSVariable.cpp
+index c498e9af8f..3c43e34dec 100644
+--- a/SU2_CFD/src/variables/CNEMONSVariable.cpp
++++ b/SU2_CFD/src/variables/CNEMONSVariable.cpp
+@@ -81,16 +81,216 @@ bool CNEMONSVariable::SetPrimVar(unsigned long iPoint, CFluidModel *FluidModel)
+ 
+   fluidmodel = static_cast<CNEMOGas*>(FluidModel);
+ 
+-  /*--- Convert conserved to primitive variables ---*/
+-  bool nonPhys = Cons2PrimVar(Solution[iPoint], Primitive[iPoint], dPdU[iPoint], dTdU[iPoint], dTvedU[iPoint], eves[iPoint], Cvves[iPoint]);
++  /*
++   * Preserve the raw conservative candidate before Cons2PrimVar().
++   * Cons2PrimVar may modify species densities in-place, so all
++   * backtracking trials must be reconstructed from this untouched
++   * candidate.
++   */
++  su2double candidateState[MAXNVAR];
+ 
+-  /*--- Reset solution to previous one, if nonphys ---*/
+-  if (nonPhys) {
+-    for (auto iVar = 0u; iVar < nVar; iVar++)
+-      Solution(iPoint,iVar) = Solution_Old(iPoint,iVar);
++  for (auto iVar = 0u; iVar < nVar; ++iVar)
++    candidateState[iVar] = Solution(iPoint,iVar);
+ 
+-    /*--- Recompute Primitive from previous solution ---*/
+-    Cons2PrimVar(Solution[iPoint], Primitive[iPoint], dPdU[iPoint], dTdU[iPoint], dTvedU[iPoint], eves[iPoint], Cvves[iPoint]);
++  /*
++   * Preserve the previous accepted vibrational-electronic temperature
++   * as the nonlinear inversion seed.  A failed trial must not poison
++   * the seed used by subsequent trials.
++   */
++  const su2double TSeed =
++      Primitive(iPoint,T_INDEX);
++  const su2double TveSeed =
++      Primitive(iPoint,TVE_INDEX);
++
++  /*
++   * Cons2PrimVar()/Mutation++ temperature inversion modifies the
++   * internal mixture state even when the candidate is subsequently
++   * rejected.  Every independent recovery attempt therefore has to
++   * begin from the same last thermochemically accepted state.
++   *
++   * In SetPrimVar() the recovery line is based on Solution_Accepted,
++   * not on the possibly-invalid current Solution candidate.
++   */
++  std::vector<su2double> acceptedRhos(nSpecies, 0.0);
++  for (unsigned short iSpecies = 0;
++       iSpecies < nSpecies;
++       ++iSpecies)
++    acceptedRhos[iSpecies] =
++        Solution_Accepted(iPoint,iSpecies);
++
++  auto restoreAcceptedFluidState = [&]() {
++    fluidmodel->SetTDStateRhosTTv(
++        acceptedRhos,
++        TSeed,
++        TveSeed);
++  };
++
++  /*
++   * First try the live conservative candidate directly.
++   *
++   * Do NOT restore Mutation++ before this conversion.  In particular,
++   * immediately after restart loading the primitive T/Tve seed may not
++   * yet represent the loaded conservative state.  Cons2PrimVar() must
++   * reconstruct that state first.
++   */
++  const bool candidateNonPhys =
++      Cons2PrimVar(
++          Solution[iPoint],
++          Primitive[iPoint],
++          dPdU[iPoint],
++          dTdU[iPoint],
++          dTvedU[iPoint],
++          eves[iPoint],
++          Cvves[iPoint]);
++
++  /*
++   * Keep state validity separate from reporting.  A recovered/backtracked
++   * state is admissible for continued computation, but the original
++   * candidate must still be reported as nonphysical to the solver.
++   */
++  bool storedStateNonPhys = candidateNonPhys;
++
++  /*
++   * A thermochemically invalid candidate is locally backtracked toward
++   * the last state that successfully completed conservative-to-primitive
++   * recovery:
++   *
++   *   U_trial =
++   *       U_accepted
++   *       + alpha (U_candidate - U_accepted),
++   *
++   * alpha = 1/2, 1/4, 1/8, ...
++   *
++   * Solution_Old is intentionally not used here.  It remains SU2's
++   * RK/time-integration buffer and is not guaranteed to be a
++   * thermochemically accepted state.
++   */
++  if (candidateNonPhys) {
++
++    bool recovered = false;
++    su2double alpha = 0.5;
++
++    constexpr unsigned short maxBacktrack = 16;
++
++    for (unsigned short iTry = 0;
++         iTry < maxBacktrack;
++         ++iTry) {
++
++      for (auto iVar = 0u;
++           iVar < nVar;
++           ++iVar) {
++
++        Solution(iPoint,iVar) =
++            Solution_Accepted(iPoint,iVar)
++            + alpha
++            * (candidateState[iVar]
++               - Solution_Accepted(iPoint,iVar));
++      }
++
++      /*
++       * Restore the complete accepted Mutation++ state before every
++       * independent thermochemical recovery attempt.  Restoring only
++       * Primitive[T,Tve] is insufficient because a failed inversion
++       * also changes Mutation++'s internal mixture state.
++       */
++      restoreAcceptedFluidState();
++
++      Primitive(iPoint,T_INDEX)   = TSeed;
++      Primitive(iPoint,TVE_INDEX) = TveSeed;
++
++      const bool trialNonPhys =
++          Cons2PrimVar(
++              Solution[iPoint],
++              Primitive[iPoint],
++              dPdU[iPoint],
++              dTdU[iPoint],
++              dTvedU[iPoint],
++              eves[iPoint],
++              Cvves[iPoint]);
++
++      if (!trialNonPhys) {
++        recovered = true;
++        break;
++      }
++
++      alpha *= 0.5;
++    }
++
++    if (recovered) {
++
++      storedStateNonPhys = false;
++
++    } else {
++
++      /*
++       * No candidate on the backtracking line was admissible.
++       * Restore the last state that was actually accepted by the
++       * thermochemical conversion rather than Solution_Old.
++       */
++      for (auto iVar = 0u;
++           iVar < nVar;
++           ++iVar)
++        Solution(iPoint,iVar) =
++            Solution_Accepted(iPoint,iVar);
++
++      restoreAcceptedFluidState();
++
++      Primitive(iPoint,T_INDEX)   = TSeed;
++      Primitive(iPoint,TVE_INDEX) = TveSeed;
++
++      const bool acceptedNonPhys =
++          Cons2PrimVar(
++              Solution[iPoint],
++              Primitive[iPoint],
++              dPdU[iPoint],
++              dTdU[iPoint],
++              dTvedU[iPoint],
++              eves[iPoint],
++              Cvves[iPoint]);
++
++      /*
++       * This condition means the solver's fundamental invariant has
++       * been violated: a state previously recorded as accepted can no
++       * longer be converted.  Never allow such a state to continue to
++       * gamma, transport properties, chemistry, vibrational relaxation,
++       * diffusion, or axisymmetric source evaluation.
++       */
++      if (acceptedNonPhys) {
++
++        std::cerr
++            << "[NEMO_ACCEPTED_STATE_FAILURE]"
++            << " point=" << iPoint
++            << " rhoE_accepted="
++            << Solution_Accepted(iPoint,nSpecies+nDim)
++            << " rhoEve_accepted="
++            << Solution_Accepted(iPoint,nSpecies+nDim+1)
++            << " T=" << Primitive(iPoint,T_INDEX)
++            << " Tve=" << Primitive(iPoint,TVE_INDEX)
++            << std::endl;
++
++        SU2_MPI::Error(
++            "NEMO last-accepted thermochemical state failed "
++            "conservative-to-primitive recovery.",
++            CURRENT_FUNCTION);
++      }
++
++      /*
++       * The restored state passed conversion, so the point ultimately
++       * stored by this routine is physical even though the original
++       * candidate was not.
++       */
++      storedStateNonPhys = false;
++    }
++  }
++
++  /*
++   * Update the persistent accepted conservative state only after a
++   * successful thermochemical conversion.  On the ordinary valid path
++   * this is only a copy and does not modify Solution or Primitive.
++   */
++  if (!storedStateNonPhys) {
++    for (auto iVar = 0u; iVar < nVar; ++iVar)
++      Solution_Accepted(iPoint,iVar) = Solution(iPoint,iVar);
+   }
+ 
+   /*--- Set additional point quantities ---*/
+@@ -118,5 +318,5 @@ bool CNEMONSVariable::SetPrimVar(unsigned long iPoint, CFluidModel *FluidModel)
+ 
+   Primitive(iPoint, LAM_VISC_INDEX) = LaminarViscosity(iPoint);
+ 
+-  return nonPhys;
++  return candidateNonPhys;
+ }
+diff --git a/UnitTests/SU2_CFD/fluid/CFluidModel_tests.cpp b/UnitTests/SU2_CFD/fluid/CFluidModel_tests.cpp
+index 311cf07e2f..f9e304a8c8 100644
+--- a/UnitTests/SU2_CFD/fluid/CFluidModel_tests.cpp
++++ b/UnitTests/SU2_CFD/fluid/CFluidModel_tests.cpp
+@@ -120,3 +120,1611 @@ TEST_CASE("Test case for data-driven fluid model") {
+   delete config;
+   delete fluid_model;
+ }
++
++
++/* MUTATIONPP_IMPLICIT_CHEM_JAC_TEST_BEGIN */
++#if defined(HAVE_MPP) && !defined(CODI_REVERSE_TYPE) && !defined(CODI_FORWARD_TYPE)
++
++#include "../../../SU2_CFD/include/fluid/CMutationTCLib.hpp"
++#include "../../../SU2_CFD/include/variables/CNEMONSVariable.hpp"
++
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <memory>
++#include <string>
++#include <vector>
++
++namespace {
++
++std::unique_ptr<CConfig> MakeMutationConfig(
++    const std::string& gas_model,
++    const bool ionization,
++    const std::vector<su2double>& rhos) {
++
++  std::stringstream config_options;
++
++  config_options << "SOLVER=NEMO_NAVIER_STOKES" << std::endl;
++  config_options << "FLUID_MODEL=MUTATIONPP" << std::endl;
++  config_options << "GAS_MODEL=" << gas_model << std::endl;
++  config_options << "IONIZATION=" << (ionization ? "YES" : "NO") << std::endl;
++  config_options << "TRANSPORT_COEFF_MODEL=WILKE" << std::endl;
++
++  /*
++   * SU2 derives nSpecies from the number of GAS_COMPOSITION entries.
++   * Keep the unit-test configuration consistent with the Mutation++
++   * mixture and with the density vector used by the test.
++   */
++  su2double rho_sum = 0.0;
++  for (const auto rho_i : rhos)
++    rho_sum += rho_i;
++
++  config_options << "GAS_COMPOSITION=(";
++  for (size_t i = 0; i < rhos.size(); ++i) {
++    if (i != 0)
++      config_options << ",";
++    config_options << rhos[i] / rho_sum;
++  }
++  config_options << ")" << std::endl;
++
++  return std::unique_ptr<CConfig>(
++      new CConfig(config_options, SU2_COMPONENT::SU2_CFD, false));
++}
++
++std::vector<su2double> EvaluateMutationChemistry(
++    CMutationTCLib& fluid_model,
++    std::vector<su2double> rhos,
++    const su2double T,
++    const su2double Tve) {
++
++  fluid_model.SetTDStateRhosTTv(rhos, T, Tve);
++
++  const auto& omega_ref =
++      fluid_model.ComputeNetProductionRates(
++          false, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
++
++  return std::vector<su2double>(omega_ref.begin(), omega_ref.end());
++}
++
++su2double EvaluateMutationEveSource(
++    CMutationTCLib& fluid_model,
++    std::vector<su2double> rhos,
++    const su2double T,
++    const su2double Tve) {
++
++  fluid_model.SetTDStateRhosTTv(rhos, T, Tve);
++  return fluid_model.ComputeEveSourceTerm();
++}
++
++void CheckMutationChemistryJacobian(
++    const std::string& gas_model,
++    const bool ionization,
++    std::vector<su2double> rhos,
++    const std::vector<unsigned short>& density_columns) {
++
++  auto config = MakeMutationConfig(gas_model, ionization, rhos);
++
++  constexpr unsigned short nDim = 2;
++  CMutationTCLib fluid_model(config.get(), nDim);
++
++  const auto& molar_mass = fluid_model.GetSpeciesMolarMass();
++  REQUIRE(molar_mass.size() == rhos.size());
++
++  const unsigned short nSpecies =
++      static_cast<unsigned short>(rhos.size());
++  const unsigned short nVar = nSpecies + nDim + 2;
++  const unsigned short nE   = nSpecies + nDim;
++  const unsigned short nEve = nSpecies + nDim + 1;
++
++  const su2double T   = 12000.0;
++  const su2double Tve = 9000.0;
++
++  std::vector<su2double> V(nSpecies + 2, 0.0);
++  for (unsigned short i = 0; i < nSpecies; ++i)
++    V[i] = rhos[i];
++  V[nSpecies]     = T;
++  V[nSpecies + 1] = Tve;
++
++  fluid_model.SetTDStateRhosTTv(rhos, T, Tve);
++
++  const auto& eve_ref = fluid_model.ComputeSpeciesEve(Tve);
++  std::vector<su2double> eve(eve_ref.begin(), eve_ref.end());
++
++  const auto& cvve_ref = fluid_model.ComputeSpeciesCvVibEle(Tve);
++  std::vector<su2double> cvve(cvve_ref.begin(), cvve_ref.end());
++
++  /*
++   * Synthetic conservative-variable temperature derivatives isolate the
++   * direct density, T, and Tve derivatives independently.
++   */
++  std::vector<su2double> dTdU(nVar, 0.0);
++  std::vector<su2double> dTvedU(nVar, 0.0);
++  dTdU[nE]       = 1.0;
++  dTvedU[nEve]   = 1.0;
++
++  std::vector<std::vector<su2double>>
++      jac(nVar, std::vector<su2double>(nVar, 0.0));
++  std::vector<su2double*> jac_ptr(nVar, nullptr);
++  for (unsigned short i = 0; i < nVar; ++i)
++    jac_ptr[i] = jac[i].data();
++
++  fluid_model.SetTDStateRhosTTv(rhos, T, Tve);
++  fluid_model.ComputeNetProductionRates(
++      true,
++      V.data(),
++      eve.data(),
++      cvve.data(),
++      dTdU.data(),
++      dTvedU.data(),
++      jac_ptr.data());
++
++  auto check_species_column =
++      [&](const unsigned short column,
++          const std::vector<su2double>& plus,
++          const std::vector<su2double>& minus,
++          const su2double delta) {
++
++    su2double column_scale = 1.0;
++    std::vector<su2double> fd(nSpecies, 0.0);
++
++    for (unsigned short i = 0; i < nSpecies; ++i) {
++      fd[i] = (plus[i] - minus[i]) / (2.0 * delta);
++      REQUIRE(std::isfinite(fd[i]));
++      REQUIRE(std::isfinite(jac[i][column]));
++      column_scale = std::max(column_scale, std::abs(fd[i]));
++      column_scale = std::max(column_scale, std::abs(jac[i][column]));
++    }
++
++    for (unsigned short i = 0; i < nSpecies; ++i) {
++      const su2double error =
++          std::abs(jac[i][column] - fd[i]) / column_scale;
++
++      CAPTURE(gas_model, column, i,
++              jac[i][column], fd[i], column_scale, error);
++      CHECK(error < 5.0e-3);
++    }
++  };
++
++  for (const auto column : density_columns) {
++    REQUIRE(column < nSpecies);
++    REQUIRE(rhos[column] > 0.0);
++
++    const su2double delta = 1.0e-5 * rhos[column];
++    REQUIRE(rhos[column] > delta);
++
++    auto rho_plus  = rhos;
++    auto rho_minus = rhos;
++    rho_plus[column]  += delta;
++    rho_minus[column] -= delta;
++
++    const auto plus =
++        EvaluateMutationChemistry(fluid_model, rho_plus, T, Tve);
++    const auto minus =
++        EvaluateMutationChemistry(fluid_model, rho_minus, T, Tve);
++
++    check_species_column(column, plus, minus, delta);
++  }
++
++  {
++    const su2double deltaT = 1.0e-5 * T;
++    const auto plus =
++        EvaluateMutationChemistry(fluid_model, rhos, T + deltaT, Tve);
++    const auto minus =
++        EvaluateMutationChemistry(fluid_model, rhos, T - deltaT, Tve);
++    check_species_column(nE, plus, minus, deltaT);
++  }
++
++  {
++    const su2double deltaTve = 1.0e-5 * Tve;
++    const auto plus =
++        EvaluateMutationChemistry(fluid_model, rhos, T, Tve + deltaTve);
++    const auto minus =
++        EvaluateMutationChemistry(fluid_model, rhos, T, Tve - deltaTve);
++    check_species_column(nEve, plus, minus, deltaTve);
++  }
++
++  /*
++   * ComputeChemistry() has no V-E residual.  The complete Mutation++
++   * energy-transfer residual is assembled by ComputeVibRelaxation(), so
++   * this Jacobian call must not populate the V-E row and double count it.
++   */
++  for (unsigned short j = 0; j < nVar; ++j) {
++    CAPTURE(gas_model, j, jac[nEve][j]);
++    CHECK(jac[nEve][j] == 0.0);
++  }
++}
++
++void CheckMutationEveSourceJacobian(
++    const std::string& gas_model,
++    const bool ionization,
++    std::vector<su2double> rhos,
++    const std::vector<unsigned short>& density_columns) {
++
++  auto config = MakeMutationConfig(gas_model, ionization, rhos);
++
++  constexpr unsigned short nDim = 2;
++  CMutationTCLib fluid_model(config.get(), nDim);
++
++  const unsigned short nSpecies =
++      static_cast<unsigned short>(rhos.size());
++  const unsigned short nVar = nSpecies + nDim + 2;
++  const unsigned short nE   = nSpecies + nDim;
++  const unsigned short nEve = nSpecies + nDim + 1;
++
++  const su2double T   = 12000.0;
++  const su2double Tve = 9000.0;
++
++  std::vector<su2double> V(nSpecies + 2, 0.0);
++  for (unsigned short i = 0; i < nSpecies; ++i)
++    V[i] = rhos[i];
++  V[nSpecies]     = T;
++  V[nSpecies + 1] = Tve;
++
++  fluid_model.SetTDStateRhosTTv(rhos, T, Tve);
++
++  const auto& eve_ref = fluid_model.ComputeSpeciesEve(Tve);
++  std::vector<su2double> eve(eve_ref.begin(), eve_ref.end());
++
++  const auto& cvve_ref = fluid_model.ComputeSpeciesCvVibEle(Tve);
++  std::vector<su2double> cvve(cvve_ref.begin(), cvve_ref.end());
++
++  std::vector<su2double> dTdU(nVar, 0.0);
++  std::vector<su2double> dTvedU(nVar, 0.0);
++  dTdU[nE]       = 1.0;
++  dTvedU[nEve]   = 1.0;
++
++  std::vector<std::vector<su2double>>
++      jac(nVar, std::vector<su2double>(nVar, 0.0));
++  std::vector<su2double*> jac_ptr(nVar, nullptr);
++  for (unsigned short i = 0; i < nVar; ++i)
++    jac_ptr[i] = jac[i].data();
++
++  fluid_model.SetTDStateRhosTTv(rhos, T, Tve);
++  fluid_model.GetEveSourceTermJacobian(
++      V.data(),
++      eve.data(),
++      cvve.data(),
++      dTdU.data(),
++      dTvedU.data(),
++      jac_ptr.data());
++
++  auto check_source_column =
++      [&](const unsigned short column,
++          const su2double plus,
++          const su2double minus,
++          const su2double delta) {
++
++    const su2double fd = (plus - minus) / (2.0 * delta);
++    REQUIRE(std::isfinite(fd));
++    REQUIRE(std::isfinite(jac[nEve][column]));
++
++    const su2double scale =
++        std::max(su2double(1.0),
++                 std::max(std::abs(fd), std::abs(jac[nEve][column])));
++    const su2double error =
++        std::abs(jac[nEve][column] - fd) / scale;
++
++    CAPTURE(gas_model, column, jac[nEve][column], fd, scale, error);
++    CHECK(error < 5.0e-3);
++  };
++
++  /*
++   * Use a different finite-difference step from the production
++   * implementation so this is an independent numerical check.
++   */
++  for (const auto column : density_columns) {
++    REQUIRE(column < nSpecies);
++    REQUIRE(rhos[column] > 0.0);
++
++    const su2double delta = 2.0e-6 * rhos[column];
++    REQUIRE(rhos[column] > delta);
++
++    auto rho_plus  = rhos;
++    auto rho_minus = rhos;
++    rho_plus[column]  += delta;
++    rho_minus[column] -= delta;
++
++    const su2double plus =
++        EvaluateMutationEveSource(fluid_model, rho_plus, T, Tve);
++    const su2double minus =
++        EvaluateMutationEveSource(fluid_model, rho_minus, T, Tve);
++
++    check_source_column(column, plus, minus, delta);
++  }
++
++  {
++    const su2double deltaT = 2.0e-6 * T;
++    const su2double plus =
++        EvaluateMutationEveSource(fluid_model, rhos, T + deltaT, Tve);
++    const su2double minus =
++        EvaluateMutationEveSource(fluid_model, rhos, T - deltaT, Tve);
++    check_source_column(nE, plus, minus, deltaT);
++  }
++
++  {
++    const su2double deltaTve = 2.0e-6 * Tve;
++    const su2double plus =
++        EvaluateMutationEveSource(fluid_model, rhos, T, Tve + deltaTve);
++    const su2double minus =
++        EvaluateMutationEveSource(fluid_model, rhos, T, Tve - deltaTve);
++    check_source_column(nEve, plus, minus, deltaTve);
++  }
++}
++
++}  // namespace
++
++
++TEST_CASE(
++    "Mutation++ AIR-5 implicit chemistry Jacobian matches finite differences",
++    "[Mutation++][NEMO][chemistry][air5]") {
++
++  /* Mutation++ AIR-5 ordering: N, O, NO, N2, O2. */
++  const std::vector<su2double> rhos = {
++      4.0e-5,
++      4.0e-5,
++      2.0e-5,
++      7.0e-4,
++      2.0e-4
++  };
++
++  CheckMutationChemistryJacobian(
++      "air_5", false, rhos, {0, 1, 3, 4});
++
++  CheckMutationEveSourceJacobian(
++      "air_5", false, rhos, {0, 1, 3, 4});
++}
++
++
++
++
++TEST_CASE(
++    "NEMO negative species candidate is individually floored",
++    "[Mutation++][NEMO][accepted-state][air5]") {
++
++  std::vector<su2double> rhos = {
++      4.0e-5,
++      4.0e-5,
++      2.0e-5,
++      7.0e-4,
++      2.0e-4
++  };
++
++  auto config = MakeMutationConfig("air_5", false, rhos);
++
++  constexpr unsigned long nDim = 2;
++  const unsigned long nSpecies = rhos.size();
++  const unsigned long nVar = nSpecies + nDim + 2;
++  const unsigned long nPrimVar = nSpecies + nDim + 10;
++  const unsigned long nPrimVarGrad = nSpecies + nDim + 8;
++
++  CMutationTCLib fluid_model(config.get(), nDim);
++
++  const su2double T = 9000.0;
++  const su2double Tve = 7000.0;
++
++  fluid_model.SetTDStateRhosTTv(rhos, T, Tve);
++  const su2double pressure = fluid_model.ComputePressure();
++
++  su2double rho = 0.0;
++  for (const auto rho_i : rhos)
++    rho += rho_i;
++
++  std::vector<su2double> massfrac(nSpecies, 0.0);
++  for (size_t i = 0; i < nSpecies; ++i)
++    massfrac[i] = rhos[i] / rho;
++
++  const su2double mach[nDim] = {0.0, 0.0};
++
++  CNEMONSVariable nodes(
++      pressure,
++      massfrac.data(),
++      mach,
++      T,
++      Tve,
++      1,
++      nDim,
++      nVar,
++      nPrimVar,
++      nPrimVarGrad,
++      config.get(),
++      &fluid_model);
++
++  /* Initialize Primitive and reaffirm the constructor state as accepted. */
++  REQUIRE_FALSE(nodes.SetPrimVar(0, &fluid_model));
++
++  const su2double accepted_rho0 = nodes.GetSolution(0, 0);
++  REQUIRE(accepted_rho0 > 0.0);
++
++  /*
++   * Create a genuinely nonphysical conservative candidate.  The old
++   * behavior silently overwrites this value with 1e-20 inside
++   * Cons2PrimVar(), so SetPrimVar() never invokes accepted-state
++   * backtracking and reports the candidate as physical.
++   */
++  nodes.SetSolution(0, 0, -0.5 * accepted_rho0);
++
++  const bool reported_nonphysical =
++      nodes.SetPrimVar(0, &fluid_model);
++
++  CAPTURE(
++      accepted_rho0,
++      nodes.GetSolution(0, 0),
++      reported_nonphysical);
++
++  CHECK_FALSE( reported_nonphysical );
++
++  /*
++   * Recovery must come from the line between the candidate and the last
++   * accepted state, not from a hard-coded species-density floor.
++   */
++  CHECK( nodes.GetSolution(0, 0) == Approx(1.0e-20).margin(1.0e-30) );
++  CHECK(nodes.GetSolution(0, 0) < accepted_rho0);
++}
++
++
++
++TEST_CASE(
++    "NEMO Euler negative species candidate is individually floored",
++    "[Mutation++][NEMO][accepted-state][euler][air5]") {
++
++  std::vector<su2double> rhos = {
++      4.0e-5,
++      4.0e-5,
++      2.0e-5,
++      7.0e-4,
++      2.0e-4
++  };
++
++  auto config = MakeMutationConfig("air_5", false, rhos);
++
++  constexpr unsigned long nDim = 2;
++  const unsigned long nSpecies = rhos.size();
++  const unsigned long nVar = nSpecies + nDim + 2;
++  const unsigned long nPrimVar = nSpecies + nDim + 10;
++  const unsigned long nPrimVarGrad = nSpecies + nDim + 8;
++
++  CMutationTCLib fluid_model(config.get(), nDim);
++
++  const su2double T = 9000.0;
++  const su2double Tve = 7000.0;
++
++  fluid_model.SetTDStateRhosTTv(rhos, T, Tve);
++  const su2double pressure = fluid_model.ComputePressure();
++
++  su2double rho = 0.0;
++  for (const auto rho_i : rhos)
++    rho += rho_i;
++
++  std::vector<su2double> massfrac(nSpecies, 0.0);
++  for (size_t i = 0; i < nSpecies; ++i)
++    massfrac[i] = rhos[i] / rho;
++
++  const su2double mach[nDim] = {0.0, 0.0};
++
++  CNEMOEulerVariable nodes(
++      pressure,
++      massfrac.data(),
++      mach,
++      T,
++      Tve,
++      1,
++      nDim,
++      nVar,
++      nPrimVar,
++      nPrimVarGrad,
++      config.get(),
++      &fluid_model);
++
++  REQUIRE_FALSE(nodes.SetPrimVar(0, &fluid_model));
++
++  const su2double accepted_rho0 = nodes.GetSolution(0, 0);
++  REQUIRE(accepted_rho0 > 0.0);
++
++  nodes.SetSolution(0, 0, -0.5 * accepted_rho0);
++
++  const bool reported_nonphysical =
++      nodes.SetPrimVar(0, &fluid_model);
++
++  CAPTURE(
++      accepted_rho0,
++      nodes.GetSolution(0, 0),
++      reported_nonphysical);
++
++  CHECK_FALSE( reported_nonphysical );
++  CHECK( nodes.GetSolution(0, 0) == Approx(1.0e-20).margin(1.0e-30) );
++
++  /*
++   * The Euler path currently jumps all the way to Solution_Old.
++   * Desired behavior matches the NS accepted-state line search:
++   * retain the largest admissible fraction of the candidate update.
++   */
++  CHECK(nodes.GetSolution(0, 0) < accepted_rho0);
++}
++
++
++TEST_CASE(
++    "Mutation++ species enthalpy honors requested temperatures",
++    "[Mutation++][NEMO][enthalpy][air5]") {
++
++  std::vector<su2double> rhos = {
++      4.0e-5,
++      4.0e-5,
++      2.0e-5,
++      7.0e-4,
++      2.0e-4
++  };
++
++  auto config = MakeMutationConfig("air_5", false, rhos);
++
++  constexpr unsigned short nDim = 2;
++  CMutationTCLib fluid_model(config.get(), nDim);
++
++  const su2double target_T   = 9000.0;
++  const su2double target_Tve = 7000.0;
++  const su2double stale_T    = 3000.0;
++  const su2double stale_Tve  = 2500.0;
++
++  /* Build a reference enthalpy vector at the requested state. */
++  fluid_model.SetTDStateRhosTTv(rhos, target_T, target_Tve);
++
++  const auto& eve_ref = fluid_model.ComputeSpeciesEve(target_Tve);
++  std::vector<su2double> eve(eve_ref.begin(), eve_ref.end());
++
++  fluid_model.SetTDStateRhosTTv(rhos, target_T, target_Tve);
++
++  const auto& h_ref_view =
++      fluid_model.ComputeSpeciesEnthalpy(target_T, target_Tve, eve.data());
++  const std::vector<su2double> h_ref(h_ref_view.begin(), h_ref_view.end());
++
++  /*
++   * Deliberately move Mutation++ to a different state.  The enthalpy
++   * routine must still honor the temperatures passed as its arguments,
++   * rather than returning properties from this stale state.
++   */
++  fluid_model.SetTDStateRhosTTv(rhos, stale_T, stale_Tve);
++
++  const auto& h_test_view =
++      fluid_model.ComputeSpeciesEnthalpy(target_T, target_Tve, eve.data());
++  const std::vector<su2double> h_test(h_test_view.begin(), h_test_view.end());
++
++  REQUIRE(h_test.size() == h_ref.size());
++
++  for (size_t i = 0; i < h_ref.size(); ++i) {
++    CAPTURE(i, h_ref[i], h_test[i]);
++    CHECK(h_test[i] == Approx(h_ref[i]).epsilon(1.0e-10).margin(1.0e-6));
++  }
++}
++
++
++
++TEST_CASE(
++    "Mutation++ AIR-5 partial catalytic wall Jacobian matches finite differences",
++    "[Mutation++][NEMO][catalytic-wall][air5]") {
++
++  /* Mutation++ AIR-5 ordering: N, O, NO, N2, O2. */
++  std::vector<su2double> rhos = {
++      4.0e-5,
++      4.0e-5,
++      2.0e-5,
++      7.0e-4,
++      2.0e-4
++  };
++
++  auto config = MakeMutationConfig("air_5", false, rhos);
++
++  constexpr unsigned long nDim = 2;
++  const unsigned long nSpecies = rhos.size();
++  const unsigned long nVar = nSpecies + nDim + 2;
++  const unsigned long nE = nSpecies + nDim;
++  const unsigned long nEve = nSpecies + nDim + 1;
++  const unsigned long nPrimVar = nSpecies + nDim + 10;
++  const unsigned long nPrimVarGrad = nSpecies + nDim + 8;
++
++  CMutationTCLib fluid_model(config.get(), nDim);
++
++  const su2double T = 9000.0;
++  const su2double Tve = 7000.0;
++
++  fluid_model.SetTDStateRhosTTv(rhos, T, Tve);
++  const su2double pressure = fluid_model.ComputePressure();
++
++  su2double rho = 0.0;
++  for (const auto rho_i : rhos)
++    rho += rho_i;
++
++  std::vector<su2double> massfrac(nSpecies, 0.0);
++  for (size_t i = 0; i < nSpecies; ++i)
++    massfrac[i] = rhos[i] / rho;
++
++  const su2double mach[nDim] = {0.0, 0.0};
++
++  CNEMONSVariable nodes(
++      pressure,
++      massfrac.data(),
++      mach,
++      T,
++      Tve,
++      1,
++      nDim,
++      nVar,
++      nPrimVar,
++      nPrimVarGrad,
++      config.get(),
++      &fluid_model);
++
++  REQUIRE_FALSE(nodes.SetPrimVar(0, &fluid_model));
++
++  std::vector<su2double> U0(nVar, 0.0);
++  for (size_t i = 0; i < nVar; ++i)
++    U0[i] = nodes.GetSolution(0, i);
++
++  const su2double Tw = 300.0;
++  const su2double gam = 0.2;
++  const su2double Area = 0.75;
++  const su2double Ru = 1000.0 * UNIVERSAL_GAS_CONSTANT;
++
++  const auto& Ms = fluid_model.GetSpeciesMolarMass();
++  const auto& RxnTable = fluid_model.GetCatalyticRecombination();
++
++  REQUIRE(Ms.size() == nSpecies);
++
++  /*
++   * Evaluate exactly the partial-catalytic residual used by
++   * CNEMONSSolver::BC_IsothermalCatalytic_Wall(), but drive its
++   * thermodynamic state from the conservative variables through
++   * CNEMONSVariable::SetPrimVar().
++   */
++  auto evaluate_residual =
++      [&](const std::vector<su2double>& U) {
++
++    for (size_t i = 0; i < nVar; ++i)
++      nodes.SetSolution(0, i, U[i]);
++
++    const bool nonphysical =
++        nodes.SetPrimVar(0, &fluid_model);
++    REQUIRE_FALSE(nonphysical);
++
++    const auto& V = nodes.GetPrimitive(0);
++    const auto& eve_ptr = nodes.GetEve(0);
++
++    const auto& h_view =
++        fluid_model.ComputeSpeciesEnthalpy(
++            V[nodes.GetTIndex()],
++            V[nodes.GetTveIndex()],
++            eve_ptr);
++
++    std::vector<su2double> residual(nVar, 0.0);
++
++    const su2double local_rho =
++        V[nodes.GetRhoIndex()];
++
++    const su2double factor =
++        gam * local_rho *
++        std::sqrt(Ru * Tw / (2.0 * PI_NUMBER)) *
++        Area;
++
++    for (size_t iSpecies = 0;
++         iSpecies < nSpecies;
++         ++iSpecies) {
++
++      const int index =
++          SU2_TYPE::Int(RxnTable(iSpecies, 1));
++
++      residual[iSpecies] =
++          RxnTable(iSpecies, 0) *
++          factor *
++          V[index] /
++          local_rho *
++          std::sqrt(1.0 / Ms[index]);
++    }
++
++    for (size_t iSpecies = 0;
++         iSpecies < nSpecies;
++         ++iSpecies) {
++
++      residual[nE] +=
++          residual[iSpecies] *
++          h_view[iSpecies];
++
++      residual[nEve] +=
++          residual[iSpecies] *
++          eve_ptr[iSpecies];
++    }
++
++    return residual;
++  };
++
++  /* Restore the reference state before forming the analytic Jacobian. */
++  const auto R0 = evaluate_residual(U0);
++  (void)R0;
++
++  const auto& V0 = nodes.GetPrimitive(0);
++
++  std::vector<su2double> species_residual(nSpecies, 0.0);
++
++  const su2double rho0 =
++      V0[nodes.GetRhoIndex()];
++
++  const su2double factor0 =
++      gam * rho0 *
++      std::sqrt(Ru * Tw / (2.0 * PI_NUMBER)) *
++      Area;
++
++  for (size_t iSpecies = 0;
++       iSpecies < nSpecies;
++       ++iSpecies) {
++
++    const int index =
++        SU2_TYPE::Int(RxnTable(iSpecies, 1));
++
++    species_residual[iSpecies] =
++        RxnTable(iSpecies, 0) *
++        factor0 *
++        V0[index] /
++        rho0 *
++        std::sqrt(1.0 / Ms[index]);
++  }
++
++  std::vector<std::vector<su2double>>
++      jac(nVar, std::vector<su2double>(nVar, 0.0));
++
++  /*
++   * Since rho*Y_index = rho_index, the species block is sparse and
++   * exact in conservative variables.
++   */
++  for (size_t iSpecies = 0;
++       iSpecies < nSpecies;
++       ++iSpecies) {
++
++    const int index =
++        SU2_TYPE::Int(RxnTable(iSpecies, 1));
++
++    jac[iSpecies][index] =
++        RxnTable(iSpecies, 0) *
++        gam *
++        std::sqrt(
++            Ru * Tw /
++            (2.0 * PI_NUMBER * Ms[index])) *
++        Area;
++  }
++
++  /*
++   * Mirror the production wall linearization: differentiate the actual
++   * species h_s(T,Tve) and e_ve,s(T,Tve) functions and invert the
++   * local two-energy thermodynamic Jacobian.
++   */
++  const su2double T0 = V0[nodes.GetTIndex()];
++  const su2double Tve0 = V0[nodes.GetTveIndex()];
++  const su2double rel_step = 2.0e-6;
++  const su2double dT =
++      rel_step * std::max(std::abs(T0), su2double(1.0));
++  const su2double dTve =
++      rel_step * std::max(std::abs(Tve0), su2double(1.0));
++
++  std::vector<su2double> h0(nSpecies, 0.0), eve0(nSpecies, 0.0);
++  std::vector<su2double> hTp(nSpecies, 0.0), hTm(nSpecies, 0.0);
++  std::vector<su2double> hVp(nSpecies, 0.0), hVm(nSpecies, 0.0);
++  std::vector<su2double> eTp(nSpecies, 0.0), eTm(nSpecies, 0.0);
++  std::vector<su2double> eVp(nSpecies, 0.0), eVm(nSpecies, 0.0);
++
++  auto sample_thermo =
++      [&](const su2double Ts,
++          const su2double Tves,
++          std::vector<su2double>& hout,
++          std::vector<su2double>& eout) {
++
++    auto state_rhos = rhos;
++    fluid_model.SetTDStateRhosTTv(
++        state_rhos, Ts, Tves);
++
++    const auto& eref =
++        fluid_model.ComputeSpeciesEve(Tves);
++
++    for (size_t i = 0; i < nSpecies; ++i)
++      eout[i] = eref[i];
++
++    const auto& href =
++        fluid_model.ComputeSpeciesEnthalpy(
++            Ts, Tves, eout.data());
++
++    for (size_t i = 0; i < nSpecies; ++i)
++      hout[i] = href[i];
++  };
++
++  sample_thermo(T0, Tve0, h0, eve0);
++  sample_thermo(T0 + dT, Tve0, hTp, eTp);
++  sample_thermo(T0 - dT, Tve0, hTm, eTm);
++  sample_thermo(T0, Tve0 + dTve, hVp, eVp);
++  sample_thermo(T0, Tve0 - dTve, hVm, eVm);
++
++  std::vector<su2double> dhdT(nSpecies, 0.0);
++  std::vector<su2double> dhdTve(nSpecies, 0.0);
++  std::vector<su2double> dedT(nSpecies, 0.0);
++  std::vector<su2double> dedTve(nSpecies, 0.0);
++  std::vector<su2double> eTotal(nSpecies, 0.0);
++  std::vector<su2double> deTotaldT(nSpecies, 0.0);
++  std::vector<su2double> deTotaldTve(nSpecies, 0.0);
++
++  su2double A = 0.0;
++  su2double B = 0.0;
++  su2double C = 0.0;
++  su2double D = 0.0;
++
++  for (size_t i = 0; i < nSpecies; ++i) {
++    dhdT[i] =
++        (hTp[i] - hTm[i]) / (2.0 * dT);
++    dhdTve[i] =
++        (hVp[i] - hVm[i]) / (2.0 * dTve);
++    dedT[i] =
++        (eTp[i] - eTm[i]) / (2.0 * dT);
++    dedTve[i] =
++        (eVp[i] - eVm[i]) / (2.0 * dTve);
++
++    eTotal[i] =
++        h0[i] - Ru / Ms[i] * T0;
++
++    deTotaldT[i] =
++        dhdT[i] - Ru / Ms[i];
++
++    deTotaldTve[i] =
++        dhdTve[i];
++
++    A += rhos[i] * deTotaldT[i];
++    B += rhos[i] * deTotaldTve[i];
++    C += rhos[i] * dedT[i];
++    D += rhos[i] * dedTve[i];
++  }
++
++  const su2double det = A * D - B * C;
++  REQUIRE(std::isfinite(det));
++  REQUIRE(std::abs(det) > 0.0);
++
++  std::vector<su2double> wall_dTdU(nVar, 0.0);
++  std::vector<su2double> wall_dTvedU(nVar, 0.0);
++
++  for (size_t jVar = 0; jVar < nVar; ++jVar) {
++
++    su2double rhs0 = 0.0;
++    su2double rhs1 = 0.0;
++
++    if (jVar < nSpecies) {
++      rhs0 = -eTotal[jVar];
++      rhs1 = -eve0[jVar];
++    } else if (jVar == nE) {
++      rhs0 = 1.0;
++    } else if (jVar == nEve) {
++      rhs1 = 1.0;
++    }
++
++    wall_dTdU[jVar] =
++        (rhs0 * D - B * rhs1) / det;
++
++    wall_dTvedU[jVar] =
++        (A * rhs1 - C * rhs0) / det;
++  }
++
++  for (size_t jVar = 0; jVar < nVar; ++jVar) {
++    for (size_t iSpecies = 0;
++         iSpecies < nSpecies;
++         ++iSpecies) {
++
++      jac[nE][jVar] +=
++          h0[iSpecies] *
++              jac[iSpecies][jVar] +
++          species_residual[iSpecies] *
++              (dhdT[iSpecies] *
++                   wall_dTdU[jVar] +
++               dhdTve[iSpecies] *
++                   wall_dTvedU[jVar]);
++
++      jac[nEve][jVar] +=
++          eve0[iSpecies] *
++              jac[iSpecies][jVar] +
++          species_residual[iSpecies] *
++              (dedT[iSpecies] *
++                   wall_dTdU[jVar] +
++               dedTve[iSpecies] *
++                   wall_dTvedU[jVar]);
++    }
++  }
++
++  {
++    auto state_rhos = rhos;
++    fluid_model.SetTDStateRhosTTv(
++        state_rhos, T0, Tve0);
++  }
++
++  /*
++   * Density columns exercise the N/O -> N2/O2 wall coupling.
++   * The two energy columns exercise dh_s/dU and de_ve,s/dU.
++   */
++  const std::vector<size_t> columns = {
++      0, 1, 2, 3, 4, nE, nEve
++  };
++
++  for (const auto column : columns) {
++
++    su2double delta = 0.0;
++
++    if (column < nSpecies) {
++      delta =
++          1.0e-5 *
++          std::max(
++              std::abs(U0[column]),
++              su2double(1.0e-12));
++      REQUIRE(U0[column] > delta);
++    } else {
++      delta =
++          2.0e-6 *
++          std::max(
++              std::abs(U0[column]),
++              su2double(1.0));
++    }
++
++    auto U_plus = U0;
++    auto U_minus = U0;
++    U_plus[column] += delta;
++    U_minus[column] -= delta;
++
++    const auto R_plus =
++        evaluate_residual(U_plus);
++    const auto R_minus =
++        evaluate_residual(U_minus);
++
++    /*
++     * Check all species rows and both energy rows. Momentum rows are
++     * identically zero for this wall contribution and need no separate
++     * finite-difference check here.
++     */
++    std::vector<size_t> rows;
++    for (size_t i = 0; i < nSpecies; ++i)
++      rows.push_back(i);
++    rows.push_back(nE);
++    rows.push_back(nEve);
++
++    for (const auto row : rows) {
++
++      const su2double fd =
++          (R_plus[row] - R_minus[row]) /
++          (2.0 * delta);
++
++      REQUIRE(std::isfinite(fd));
++      REQUIRE(std::isfinite(jac[row][column]));
++
++      const su2double scale =
++          std::max(
++              su2double(1.0),
++              std::max(
++                  std::abs(fd),
++                  std::abs(jac[row][column])));
++
++      const su2double error =
++          std::abs(
++              jac[row][column] - fd) /
++          scale;
++
++      CAPTURE(
++          row,
++          column,
++          jac[row][column],
++          fd,
++          scale,
++          error);
++
++      CHECK(error < 5.0e-4);
++    }
++  }
++
++  /* Leave the shared test object at its original physical state. */
++  for (size_t i = 0; i < nVar; ++i)
++    nodes.SetSolution(0, i, U0[i]);
++  REQUIRE_FALSE(nodes.SetPrimVar(0, &fluid_model));
++}
++
++
++
++
++TEST_CASE(
++    "Mutation++ AIR-7 temperature derivatives match conservative finite differences",
++    "[Mutation++][NEMO][thermo-derivatives][air7]") {
++
++  /*
++   * Use a small but non-zero electron/ion population so the ionized
++   * two-temperature coupling is exercised without perturbing through
++   * a zero species density.
++   */
++  std::vector<su2double> rhos = {
++      1.0e-8,
++      7.0e-4,
++      2.0e-4,
++      2.0e-5,
++      4.0e-5,
++      4.0e-5,
++      1.0e-8
++  };
++
++  auto config = MakeMutationConfig("air_7", true, rhos);
++
++  constexpr unsigned long nDim = 2;
++  const unsigned long nSpecies = rhos.size();
++  const unsigned long nVar = nSpecies + nDim + 2;
++  const unsigned long nPrimVar = nSpecies + nDim + 10;
++  const unsigned long nPrimVarGrad = nSpecies + nDim + 8;
++
++  CMutationTCLib fluid_model(config.get(), nDim);
++
++  const su2double T = 12000.0;
++  const su2double Tve = 9000.0;
++
++  fluid_model.SetTDStateRhosTTv(rhos, T, Tve);
++  const su2double pressure = fluid_model.ComputePressure();
++
++  su2double rho = 0.0;
++  for (const auto rho_i : rhos)
++    rho += rho_i;
++
++  std::vector<su2double> massfrac(nSpecies, 0.0);
++  for (size_t i = 0; i < nSpecies; ++i)
++    massfrac[i] = rhos[i] / rho;
++
++  const su2double mach[nDim] = {0.0, 0.0};
++
++  CNEMONSVariable nodes(
++      pressure,
++      massfrac.data(),
++      mach,
++      T,
++      Tve,
++      1,
++      nDim,
++      nVar,
++      nPrimVar,
++      nPrimVarGrad,
++      config.get(),
++      &fluid_model);
++
++  REQUIRE_FALSE(nodes.SetPrimVar(0, &fluid_model));
++
++  std::vector<su2double> U0(nVar, 0.0);
++  for (size_t i = 0; i < nVar; ++i)
++    U0[i] = nodes.GetSolution(0, i);
++
++  std::vector<su2double> analytic_dTdU(nVar, 0.0);
++  std::vector<su2double> analytic_dTvedU(nVar, 0.0);
++
++  for (size_t i = 0; i < nVar; ++i) {
++    analytic_dTdU[i] = nodes.GetdTdU(0)[i];
++    analytic_dTvedU[i] = nodes.GetdTvedU(0)[i];
++  }
++
++  auto evaluate_temperatures =
++      [&](const std::vector<su2double>& U) {
++
++    for (size_t i = 0; i < nVar; ++i)
++      nodes.SetSolution(0, i, U[i]);
++
++    const bool nonphysical =
++        nodes.SetPrimVar(0, &fluid_model);
++    REQUIRE_FALSE(nonphysical);
++
++    return std::array<su2double, 2>{
++        nodes.GetTemperature(0),
++        nodes.GetTemperature_ve(0)};
++  };
++
++  for (size_t column = 0; column < nVar; ++column) {
++
++    su2double delta = 0.0;
++
++    if (column < nSpecies) {
++      delta =
++          2.0e-6 *
++          std::max(
++              std::abs(U0[column]),
++              su2double(1.0e-14));
++      REQUIRE(U0[column] > delta);
++    } else {
++      delta =
++          2.0e-6 *
++          std::max(
++              std::abs(U0[column]),
++              su2double(1.0));
++    }
++
++    auto U_plus = U0;
++    auto U_minus = U0;
++    U_plus[column] += delta;
++    U_minus[column] -= delta;
++
++    const auto plus =
++        evaluate_temperatures(U_plus);
++    const auto minus =
++        evaluate_temperatures(U_minus);
++
++    const su2double fd_dTdU =
++        (plus[0] - minus[0]) / (2.0 * delta);
++    const su2double fd_dTvedU =
++        (plus[1] - minus[1]) / (2.0 * delta);
++
++    const su2double scale_T =
++        std::max(
++            su2double(1.0),
++            std::max(
++                std::abs(fd_dTdU),
++                std::abs(analytic_dTdU[column])));
++
++    const su2double scale_Tve =
++        std::max(
++            su2double(1.0),
++            std::max(
++                std::abs(fd_dTvedU),
++                std::abs(analytic_dTvedU[column])));
++
++    const su2double error_T =
++        std::abs(
++            analytic_dTdU[column] -
++            fd_dTdU) /
++        scale_T;
++
++    const su2double error_Tve =
++        std::abs(
++            analytic_dTvedU[column] -
++            fd_dTvedU) /
++        scale_Tve;
++
++    CAPTURE(
++        column,
++        analytic_dTdU[column],
++        fd_dTdU,
++        error_T,
++        analytic_dTvedU[column],
++        fd_dTvedU,
++        error_Tve);
++
++    CHECK(error_T < 5.0e-4);
++    CHECK(error_Tve < 5.0e-4);
++  }
++
++  for (size_t i = 0; i < nVar; ++i)
++    nodes.SetSolution(0, i, U0[i]);
++
++  REQUIRE_FALSE(nodes.SetPrimVar(0, &fluid_model));
++}
++
++
++
++TEST_CASE(
++    "Mutation++ AIR-11 temperature derivatives match conservative finite differences",
++    "[Mutation++][NEMO][thermo-derivatives][air11]") {
++
++  /*
++   * AIR-11 ordering:
++   * e-, N+, O+, NO+, N2+, O2+, N, O, NO, N2, O2.
++   *
++   * Use a finite, approximately charge-neutral ionized state so every
++   * conservative species column can be perturbed with a centered finite
++   * difference while exercising electron/heavy-particle coupling.
++   */
++  std::vector<su2double> rhos = {
++      3.61081e-8,
++      7.0e-4,
++      2.0e-4,
++      2.0e-5,
++      4.0e-5,
++      4.0e-5,
++      4.0e-5,
++      4.0e-5,
++      2.0e-5,
++      7.0e-4,
++      2.0e-4
++  };
++
++  auto config = MakeMutationConfig("air_11", true, rhos);
++
++  constexpr unsigned long nDim = 2;
++  const unsigned long nSpecies = rhos.size();
++  const unsigned long nVar = nSpecies + nDim + 2;
++  const unsigned long nPrimVar = nSpecies + nDim + 10;
++  const unsigned long nPrimVarGrad = nSpecies + nDim + 8;
++
++  CMutationTCLib fluid_model(config.get(), nDim);
++
++  const su2double T = 12000.0;
++  const su2double Tve = 9000.0;
++
++  fluid_model.SetTDStateRhosTTv(rhos, T, Tve);
++  const su2double pressure = fluid_model.ComputePressure();
++
++  su2double rho = 0.0;
++  for (const auto rho_i : rhos)
++    rho += rho_i;
++
++  std::vector<su2double> massfrac(nSpecies, 0.0);
++  for (size_t i = 0; i < nSpecies; ++i)
++    massfrac[i] = rhos[i] / rho;
++
++  const su2double mach[nDim] = {0.0, 0.0};
++
++  CNEMONSVariable nodes(
++      pressure,
++      massfrac.data(),
++      mach,
++      T,
++      Tve,
++      1,
++      nDim,
++      nVar,
++      nPrimVar,
++      nPrimVarGrad,
++      config.get(),
++      &fluid_model);
++
++  REQUIRE_FALSE(nodes.SetPrimVar(0, &fluid_model));
++
++  std::vector<su2double> U0(nVar, 0.0);
++  for (size_t i = 0; i < nVar; ++i)
++    U0[i] = nodes.GetSolution(0, i);
++
++  std::vector<su2double> analytic_dTdU(nVar, 0.0);
++  std::vector<su2double> analytic_dTvedU(nVar, 0.0);
++
++  for (size_t i = 0; i < nVar; ++i) {
++    analytic_dTdU[i] = nodes.GetdTdU(0)[i];
++    analytic_dTvedU[i] = nodes.GetdTvedU(0)[i];
++  }
++
++  auto evaluate_temperatures =
++      [&](const std::vector<su2double>& U) {
++
++    for (size_t i = 0; i < nVar; ++i)
++      nodes.SetSolution(0, i, U[i]);
++
++    const bool nonphysical =
++        nodes.SetPrimVar(0, &fluid_model);
++    REQUIRE_FALSE(nonphysical);
++
++    return std::array<su2double, 2>{
++        nodes.GetTemperature(0),
++        nodes.GetTemperature_ve(0)};
++  };
++
++  for (size_t column = 0; column < nVar; ++column) {
++
++    su2double delta = 0.0;
++
++    if (column < nSpecies) {
++      /*
++       * Species-density perturbations can produce extremely small
++       * temperature changes for weakly V-E-active neutral species
++       * (notably O in AIR-11).  Use a 10x larger centered step here to
++       * keep the Mutation++ nonlinear energy inversion above its
++       * roundoff/closure floor without relaxing the derivative tolerance.
++       */
++      delta =
++          2.0e-5 *
++          std::max(
++              std::abs(U0[column]),
++              su2double(1.0e-14));
++      REQUIRE(U0[column] > delta);
++    } else {
++      delta =
++          2.0e-6 *
++          std::max(
++              std::abs(U0[column]),
++              su2double(1.0));
++    }
++
++    auto U_plus = U0;
++    auto U_minus = U0;
++    U_plus[column] += delta;
++    U_minus[column] -= delta;
++
++    const auto plus =
++        evaluate_temperatures(U_plus);
++    const auto minus =
++        evaluate_temperatures(U_minus);
++
++    const su2double fd_dTdU =
++        (plus[0] - minus[0]) / (2.0 * delta);
++    const su2double fd_dTvedU =
++        (plus[1] - minus[1]) / (2.0 * delta);
++
++    const su2double scale_T =
++        std::max(
++            su2double(1.0),
++            std::max(
++                std::abs(fd_dTdU),
++                std::abs(analytic_dTdU[column])));
++
++    const su2double scale_Tve =
++        std::max(
++            su2double(1.0),
++            std::max(
++                std::abs(fd_dTvedU),
++                std::abs(analytic_dTvedU[column])));
++
++    const su2double error_T =
++        std::abs(
++            analytic_dTdU[column] -
++            fd_dTdU) /
++        scale_T;
++
++    const su2double error_Tve =
++        std::abs(
++            analytic_dTvedU[column] -
++            fd_dTvedU) /
++        scale_Tve;
++
++    CAPTURE(
++        column,
++        analytic_dTdU[column],
++        fd_dTdU,
++        error_T,
++        analytic_dTvedU[column],
++        fd_dTvedU,
++        error_Tve);
++
++    CHECK(error_T < 5.0e-4);
++    CHECK(error_Tve < 5.0e-4);
++  }
++
++  for (size_t i = 0; i < nVar; ++i)
++    nodes.SetSolution(0, i, U0[i]);
++
++  REQUIRE_FALSE(nodes.SetPrimVar(0, &fluid_model));
++}
++
++
++
++
++TEST_CASE(
++    "NEMO AIR-11 implicit thermochemical step limiter backtracks an invalid energy update",
++    "[Mutation++][NEMO][implicit][admissibility][air11]") {
++
++  /*
++   * Use the same finite ionized AIR-11 state as the thermodynamic
++   * derivative regression.  Construct an intentionally excessive
++   * negative rhoE update.  The full step must be rejected, while
++   * repeated binary backtracking must find a realizable state without
++   * modifying the live solution.
++   */
++  std::vector<su2double> rhos = {
++      3.61081e-8,
++      7.0e-4,
++      2.0e-4,
++      2.0e-5,
++      4.0e-5,
++      4.0e-5,
++      4.0e-5,
++      4.0e-5,
++      2.0e-5,
++      7.0e-4,
++      2.0e-4
++  };
++
++  auto config = MakeMutationConfig("air_11", true, rhos);
++
++  constexpr unsigned long nDim = 2;
++  const unsigned long nSpecies = rhos.size();
++  const unsigned long nVar = nSpecies + nDim + 2;
++  const unsigned long nPrimVar = nSpecies + nDim + 10;
++  const unsigned long nPrimVarGrad = nSpecies + nDim + 8;
++
++  CMutationTCLib fluid_model(config.get(), nDim);
++
++  const su2double T = 12000.0;
++  const su2double Tve = 9000.0;
++
++  fluid_model.SetTDStateRhosTTv(rhos, T, Tve);
++  const su2double pressure = fluid_model.ComputePressure();
++
++  su2double rho = 0.0;
++  for (const auto rho_i : rhos)
++    rho += rho_i;
++
++  std::vector<su2double> massfrac(nSpecies, 0.0);
++  for (size_t i = 0; i < nSpecies; ++i)
++    massfrac[i] = rhos[i] / rho;
++
++  const su2double mach[nDim] = {0.0, 0.0};
++
++  CNEMONSVariable nodes(
++      pressure,
++      massfrac.data(),
++      mach,
++      T,
++      Tve,
++      1,
++      nDim,
++      nVar,
++      nPrimVar,
++      nPrimVarGrad,
++      config.get(),
++      &fluid_model);
++
++  REQUIRE_FALSE(nodes.SetPrimVar(0, &fluid_model));
++
++  std::vector<su2double> U0(nVar, 0.0);
++  for (size_t i = 0; i < nVar; ++i)
++    U0[i] = nodes.GetSolution(0, i);
++
++  const unsigned long energy_index = nSpecies + nDim;
++
++  REQUIRE(U0[energy_index] > 0.0);
++
++  std::vector<su2double> deltaU(nVar, 0.0);
++
++  /*
++   * Make alpha=1 grossly inadmissible.  As alpha -> 0 the trial state
++   * approaches the already valid U0, so binary backtracking must
++   * eventually find a valid state.
++   */
++  deltaU[energy_index] = -2.0 * U0[energy_index];
++
++  const su2double alpha =
++      nodes.ComputeAdmissibleImplicitStep(
++          0,
++          deltaU.data(),
++          1.0,
++          &fluid_model,
++          24);
++
++  CAPTURE(alpha);
++
++  REQUIRE(alpha > 0.0);
++  REQUIRE(alpha < 1.0);
++
++  /*
++   * The accepted trial returned by the limiter must be thermochemically
++   * realizable.
++   */
++  std::vector<su2double> Utrial = U0;
++
++  for (size_t i = 0; i < nVar; ++i)
++    Utrial[i] += alpha * deltaU[i];
++
++  std::vector<su2double> Vtrial(nPrimVar, 0.0);
++  std::vector<su2double> dPdU(nVar, 0.0);
++  std::vector<su2double> dTdU(nVar, 0.0);
++  std::vector<su2double> dTvedU(nVar, 0.0);
++  std::vector<su2double> eves(nSpecies, 0.0);
++  std::vector<su2double> Cvves(nSpecies, 0.0);
++
++  Vtrial[nodes.GetTIndex()] = nodes.GetTemperature(0);
++  Vtrial[nodes.GetTveIndex()] = nodes.GetTemperature_ve(0);
++
++  REQUIRE_FALSE(
++      nodes.Cons2PrimVar(
++          Utrial.data(),
++          Vtrial.data(),
++          dPdU.data(),
++          dTdU.data(),
++          dTvedU.data(),
++          eves.data(),
++          Cvves.data()));
++
++  REQUIRE(std::isfinite(Vtrial[nodes.GetTIndex()]));
++  REQUIRE(std::isfinite(Vtrial[nodes.GetTveIndex()]));
++  REQUIRE(Vtrial[nodes.GetTIndex()] > 0.0);
++  REQUIRE(Vtrial[nodes.GetTveIndex()] > 0.0);
++
++  /*
++   * The helper is a trial-state calculation only.  It must not modify
++   * the live conservative solution.
++   */
++  for (size_t i = 0; i < nVar; ++i)
++    CHECK(nodes.GetSolution(0, i) == Approx(U0[i]));
++}
++
++
++TEST_CASE(
++    "Mutation++ AIR-7 implicit chemistry Jacobian matches finite differences",
++    "[Mutation++][NEMO][chemistry][air7]") {
++
++  const std::vector<su2double> rhos = {
++      1.0e-12,
++      7.0e-4,
++      2.0e-4,
++      2.0e-5,
++      4.0e-5,
++      4.0e-5,
++      1.0e-10
++  };
++
++  CheckMutationChemistryJacobian(
++      "air_7", true, rhos, {1, 2, 4, 5});
++
++  CheckMutationEveSourceJacobian(
++      "air_7", true, rhos, {1, 2, 4, 5});
++}
++
++
++
++TEST_CASE(
++    "NEMO ionized gamma uses heavy-particle translational gas constant",
++    "[Mutation++][NEMO][gamma][air11]") {
++
++  /*
++   * AIR-11 ordering:
++   * e-, N+, O+, NO+, N2+, O2+, N, O, NO, N2, O2.
++   *
++   * Use a deliberately visible electron density so inclusion of the
++   * electron gas constant in the numerator cannot hide in roundoff.
++   */
++  std::vector<su2double> rhos = {
++      1.0e-8,
++      1.0e-9,
++      1.0e-9,
++      1.0e-9,
++      1.0e-9,
++      1.0e-9,
++      4.0e-5,
++      4.0e-5,
++      2.0e-5,
++      7.0e-4,
++      2.0e-4
++  };
++
++  auto config = MakeMutationConfig("air_11", true, rhos);
++
++  constexpr unsigned short nDim = 2;
++  CMutationTCLib fluid_model(config.get(), nDim);
++
++  const su2double T = 12000.0;
++  const su2double Tve = 9000.0;
++  fluid_model.SetTDStateRhosTTv(rhos, T, Tve);
++
++  const auto& molar_mass = fluid_model.GetSpeciesMolarMass();
++  const auto& cvtr = fluid_model.GetSpeciesCvTraRot();
++
++  REQUIRE(molar_mass.size() == rhos.size());
++  REQUIRE(cvtr.size() == rhos.size());
++
++  su2double rhoCvtr = 0.0;
++  su2double rhoR_heavy = 0.0;
++  const su2double Ru = 1000.0 * UNIVERSAL_GAS_CONSTANT;
++
++  /* Electron is index 0; translational heavy-particle gamma excludes it. */
++  for (size_t i = 1; i < rhos.size(); ++i) {
++    rhoCvtr += rhos[i] * cvtr[i];
++    rhoR_heavy += rhos[i] * Ru / molar_mass[i];
++  }
++
++  REQUIRE(rhoCvtr > 0.0);
++
++  const su2double expected_gamma = 1.0 + rhoR_heavy / rhoCvtr;
++  const su2double computed_gamma = fluid_model.ComputeGamma();
++
++  CAPTURE(expected_gamma, computed_gamma);
++  CHECK(computed_gamma ==
++        Approx(expected_gamma).epsilon(1.0e-12).margin(1.0e-12));
++}
++
++
++TEST_CASE(
++    "Mutation++ AIR-11 implicit chemistry Jacobian matches finite differences",
++    "[Mutation++][NEMO][chemistry][air11]") {
++
++  const std::vector<su2double> rhos = {
++      1.0e-12,
++      1.0e-9,
++      1.0e-9,
++      1.0e-9,
++      1.0e-9,
++      1.0e-9,
++      4.0e-5,
++      4.0e-5,
++      2.0e-5,
++      7.0e-4,
++      2.0e-4
++  };
++
++  CheckMutationChemistryJacobian(
++      "air_11", true, rhos, {6, 7, 9, 10});
++
++  CheckMutationEveSourceJacobian(
++      "air_11", true, rhos, {6, 7, 9, 10});
++}
++
++#endif
++/* MUTATIONPP_IMPLICIT_CHEM_JAC_TEST_END */

@@ -182,7 +182,15 @@ CNumerics::ResidualType<> CSource_NEMO::ComputeAxisymmetric(const CConfig *confi
   const su2double H = V_i[H_INDEX];
   const su2double rhoEve = U_i[nVar-1];
   const auto& Ms = fluidmodel->GetSpeciesMolarMass();
-  const auto& hs = fluidmodel->ComputeSpeciesEnthalpy(V_i[T_INDEX], V_i[TVE_INDEX], eve_i );
+
+  vector<su2double> state_rhos(nSpecies, 0.0);
+  for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies)
+    state_rhos[iSpecies] = V_i[RHOS_INDEX+iSpecies];
+
+  fluidmodel->SetTDStateRhosTTv(
+      state_rhos, V_i[T_INDEX], V_i[TVE_INDEX]);
+  const auto& hs =
+      fluidmodel->ComputeSpeciesEnthalpy(V_i[T_INDEX], V_i[TVE_INDEX], eve_i);
 
   const bool viscous = config->GetViscous();
   const bool rans = (config->GetKind_Turb_Model() != TURB_MODEL::NONE);
@@ -272,7 +280,7 @@ CNumerics::ResidualType<> CSource_NEMO::ComputeAxisymmetric(const CConfig *confi
     if (!rans){ turb_ke_i = 0.0; }
 
     su2double Vector = 0.0;
-    for (auto iSpecies = 0ul; iSpecies < nHeavy; iSpecies++)
+    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++)
       Vector += rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][1];
 
     su2double Mass = 0.0;
@@ -290,7 +298,7 @@ CNumerics::ResidualType<> CSource_NEMO::ComputeAxisymmetric(const CConfig *confi
     /*--- Enthalpy and vib-el energy transport due to y-direction diffusion---*/
     su2double sumJhs_y, sumJeve_y;
     sumJhs_y = sumJeve_y = 0.0;
-    for (auto iSpecies = 0ul; iSpecies < nHeavy; iSpecies++) {
+    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
       sumJhs_y  += -(rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][1] - V_i[RHOS_INDEX+iSpecies]*Vector) * hs[iSpecies];
       sumJeve_y += -(rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][1] - V_i[RHOS_INDEX+iSpecies]*Vector) * eve_i[iSpecies];
     }

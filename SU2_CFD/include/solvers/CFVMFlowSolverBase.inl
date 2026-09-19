@@ -1680,6 +1680,54 @@ void CFVMFlowSolverBase<V, FlowRegime>::SetResidual_DualTime(CGeometry *geometry
 
   TimeStep = config->GetDelta_UnstTimeND();
 
+  const bool adaptive_physical_time =
+      config->GetAdaptive_Physical_Time();
+
+  /*
+   * Variable-step BDF2:
+   *
+   * h = dt_{n+1}, k = dt_n, r = h/k
+   *
+   * a0 = (1 + 2r)/(h(1+r))
+   * a1 = -(1+r)/h
+   * a2 = r^2/(h(1+r))
+   *
+   * For r=1 this exactly reduces to
+   * 3/(2h), -4/(2h), 1/(2h).
+   */
+  su2double bdf_a0 = 0.0;
+  su2double bdf_a1 = 0.0;
+  su2double bdf_a2 = 0.0;
+
+  if (second_order && adaptive_physical_time) {
+
+    if (dynamic_grid) {
+      SU2_MPI::Error(
+          "Variable-step BDF2 currently supports static grids only.",
+          CURRENT_FUNCTION);
+    }
+
+    su2double PreviousTimeStep =
+        config->GetPrevious_Delta_UnstTimeND();
+
+    if (PreviousTimeStep <= 0.0)
+      PreviousTimeStep = TimeStep;
+
+    const su2double ratio =
+        TimeStep / PreviousTimeStep;
+
+    bdf_a0 =
+        (1.0 + 2.0*ratio) /
+        (TimeStep*(1.0 + ratio));
+
+    bdf_a1 =
+        -(1.0 + ratio) / TimeStep;
+
+    bdf_a2 =
+        (ratio*ratio) /
+        (TimeStep*(1.0 + ratio));
+  }
+
   /*--- Compute the dual time-stepping source term for static meshes ---*/
 
   if (!dynamic_grid) {
@@ -1710,15 +1758,31 @@ void CFVMFlowSolverBase<V, FlowRegime>::SetResidual_DualTime(CGeometry *geometry
       for (iVar = 0; iVar < nVar; iVar++) {
         if (first_order)
           LinSysRes(iPoint,iVar) += (U_time_nP1[iVar] - U_time_n[iVar])*Volume_nP1 / TimeStep;
-        if (second_order)
-          LinSysRes(iPoint,iVar) += ( 3.0*U_time_nP1[iVar] - 4.0*U_time_n[iVar]
-                                     +1.0*U_time_nM1[iVar])*Volume_nP1 / (2.0*TimeStep);
+        if (second_order) {
+          if (adaptive_physical_time)
+            LinSysRes(iPoint,iVar) +=
+                (bdf_a0*U_time_nP1[iVar] +
+                 bdf_a1*U_time_n[iVar] +
+                 bdf_a2*U_time_nM1[iVar])*Volume_nP1;
+          else
+            LinSysRes(iPoint,iVar) +=
+                (3.0*U_time_nP1[iVar] -
+                 4.0*U_time_n[iVar] +
+                 1.0*U_time_nM1[iVar])*Volume_nP1 /
+                (2.0*TimeStep);
+        }
       }
 
       /*--- Compute the Jacobian contribution due to the dual time source term. ---*/
       if (implicit) {
         if (first_order) Jacobian.AddVal2Diag(iPoint, Volume_nP1/TimeStep);
-        if (second_order) Jacobian.AddVal2Diag(iPoint, (Volume_nP1*3.0)/(2.0*TimeStep));
+        if (second_order) {
+          if (adaptive_physical_time)
+            Jacobian.AddVal2Diag(iPoint, Volume_nP1*bdf_a0);
+          else
+            Jacobian.AddVal2Diag(
+                iPoint, (Volume_nP1*3.0)/(2.0*TimeStep));
+        }
       }
     }
     END_SU2_OMP_FOR
@@ -1838,7 +1902,13 @@ void CFVMFlowSolverBase<V, FlowRegime>::SetResidual_DualTime(CGeometry *geometry
       /*--- Compute the Jacobian contribution due to the dual time source term. ---*/
       if (implicit) {
         if (first_order) Jacobian.AddVal2Diag(iPoint, Volume_nP1/TimeStep);
-        if (second_order) Jacobian.AddVal2Diag(iPoint, (Volume_nP1*3.0)/(2.0*TimeStep));
+        if (second_order) {
+          if (adaptive_physical_time)
+            Jacobian.AddVal2Diag(iPoint, Volume_nP1*bdf_a0);
+          else
+            Jacobian.AddVal2Diag(
+                iPoint, (Volume_nP1*3.0)/(2.0*TimeStep));
+        }
       }
     }
     END_SU2_OMP_FOR

@@ -2510,6 +2510,7 @@ void CFlowOutput::SetNearfieldInverseDesign(CSolver *solver, const CGeometry *ge
 void CFlowOutput::WriteAdditionalFiles(CConfig *config, CGeometry *geometry, CSolver **solver_container){
 
   if (config->GetFixed_CL_Mode() ||
+      config->GetAdaptive_Physical_Time() ||
       (config->GetKind_Streamwise_Periodic() == ENUM_STREAMWISE_PERIODIC::MASSFLOW)){
     WriteMetaData(config);
   }
@@ -2540,6 +2541,33 @@ void CFlowOutput::WriteMetaData(const CConfig *config){
       meta_file <<"ITER= " << curTimeIter + 1 << endl;
     else
       meta_file <<"ITER= " << curInnerIter + config->GetExtIter_OffSet() + 1 << endl;
+
+    /*
+     * Adaptive physical-time restart state.
+     *
+     * Store the non-dimensional values actually used by the solver rather
+     * than recomputing them from RESTART_ITER.  Variable-step BDF2 requires
+     * the preceding physical step and the accumulated physical time.
+     */
+    if (config->GetAdaptive_Physical_Time()) {
+
+      /*
+       * Preserve enough significant decimal digits for an exact binary64
+       * round trip.  Adaptive BDF2 restart depends on reproducing the
+       * physical-step history without decimal truncation.
+       */
+      const auto old_precision = meta_file.precision();
+      meta_file.precision(17);
+
+      meta_file << "ADAPTIVE_PHYSICAL_DT_ND= "
+                << config->GetDelta_UnstTimeND() << endl;
+      meta_file << "ADAPTIVE_PREVIOUS_PHYSICAL_DT_ND= "
+                << config->GetPrevious_Delta_UnstTimeND() << endl;
+      meta_file << "ADAPTIVE_PHYSICAL_TIME_ND= "
+                << config->GetAdaptive_Physical_Time_AccumND() << endl;
+
+      meta_file.precision(old_precision);
+    }
 
     if (config->GetFixed_CL_Mode()){
       meta_file <<"AOA= " << config->GetAoA() - config->GetAoA_Offset() << endl;

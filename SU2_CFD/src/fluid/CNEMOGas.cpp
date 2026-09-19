@@ -133,7 +133,7 @@ su2double CNEMOGas::ComputeGamma(){
 
   /*--- Gamma Computation ---*/
   su2double rhoR = 0.0;
-  for(iSpecies = 0; iSpecies < nSpecies; iSpecies++)
+  for(iSpecies = nEl; iSpecies < nSpecies; iSpecies++)
     rhoR += rhos[iSpecies]*Ru/MolarMass[iSpecies];
 
   gamma = rhoR/rhoCvtr+1;
@@ -198,7 +198,7 @@ void CNEMOGas::ComputedPdU(const su2double *V, const vector<su2double>& val_eves
 
   /*--- Species density derivatives ---*/
   su2double ef = 0.0;
-  for (iSpecies = nEl; iSpecies < nHeavy; iSpecies++) {
+  for (iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
     ef = Enthalpy_Formation[iSpecies] - Ru/MolarMass[iSpecies]*Ref_Temperature[iSpecies];
     val_dPdU[iSpecies] = T*Ru/MolarMass[iSpecies] + Ru*conc/rhoCvtr *
                          (-Cvtrs[iSpecies]*(T-Ref_Temperature[iSpecies]) -

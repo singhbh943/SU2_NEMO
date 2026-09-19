@@ -1848,6 +1848,15 @@ void CConfig::SetConfig_Options() {
   addUnsignedShortOption("TIME_DOFS_ADER_DG", nTimeDOFsADER_DG, 2);
   /* DESCRIPTION: Unsteady Courant-Friedrichs-Lewy number of the finest grid */
   addDoubleOption("UNST_CFL_NUMBER", Unst_CFL, 0.0);
+
+  /* DESCRIPTION: Enable variable physical time step for dual-time integration. */
+  addBoolOption("ADAPTIVE_PHYSICAL_TIME", Adaptive_Physical_Time, false);
+
+  /* DESCRIPTION: Maximum multiplicative growth of physical dt per physical step. */
+  addDoubleOption("PHYSICAL_TIME_STEP_GROWTH", Physical_Time_Step_Growth, 1.25);
+
+  /* DESCRIPTION: Maximum dimensional physical time step for adaptive dual-time integration (s). */
+  addDoubleOption("MAX_PHYSICAL_TIME_STEP", Max_Physical_Time_Step, 1.0e20);
   /* DESCRIPTION: Integer number of periodic time instances for Harmonic Balance */
   addUnsignedShortOption("TIME_INSTANCES", nTimeInstances, 1);
   /* DESCRIPTION: Time period for Harmonic Balance wihtout moving meshes */
@@ -7353,8 +7362,6 @@ void CConfig::SetOutput(SU2_COMPONENT val_software, unsigned short val_izone) {
           break;
         case EULER_IMPLICIT:
           cout << "Euler implicit method for the flow equations." << endl;
-          if (Kind_FluidModel == MUTATIONPP)
-            SU2_MPI::Error("Implicit time scheme is not yet implemented with Mutation++. Use EULER_EXPLICIT.", CURRENT_FUNCTION);
           switch (Kind_Linear_Solver) {
             case BCGSTAB:
             case FGMRES:

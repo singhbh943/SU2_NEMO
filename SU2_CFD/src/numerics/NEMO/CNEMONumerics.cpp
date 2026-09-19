@@ -250,12 +250,23 @@ void CNEMONumerics::GetViscousProjFlux(const su2double *val_primvar,
   const su2double Tve = val_primvar[TVE_INDEX];
   const auto& V   = val_primvar;
   const auto& GV  = val_gradprimvar;
+
+  /*
+   * The non-standard primitive vector used here stores species mass
+   * fractions.  Reconstruct the partial densities before requesting
+   * state-dependent Mutation++ thermodynamic properties.
+   */
+  vector<su2double> state_rhos(nSpecies, 0.0);
+  for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies)
+    state_rhos[iSpecies] = rho * V[RHOS_INDEX+iSpecies];
+
+  fluidmodel->SetTDStateRhosTTv(state_rhos, T, Tve);
   const auto& hs = fluidmodel->ComputeSpeciesEnthalpy(T, Tve, val_eve);
 
   /*--- Pre-compute mixture quantities ---*/  //TODO
   su2double Vector[MAXNDIM] = {0.0};
   for (auto iDim = 0ul; iDim < nDim; iDim++) {
-    for (auto iSpecies = 0ul; iSpecies < nHeavy; iSpecies++) {
+    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
       Vector[iDim] += rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][iDim];
     }
   }
@@ -267,7 +278,7 @@ void CNEMONumerics::GetViscousProjFlux(const su2double *val_primvar,
   for (auto iDim = 0ul; iDim < nDim; iDim++) {
 
     /*--- Species diffusion velocity ---*/
-    for (auto iSpecies = 0ul; iSpecies < nHeavy; iSpecies++) {
+    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
       Flux_Tensor[iSpecies][iDim] = rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][iDim]
           - V[RHOS_INDEX+iSpecies]*Vector[iDim];
     }
@@ -280,7 +291,7 @@ void CNEMONumerics::GetViscousProjFlux(const su2double *val_primvar,
     }
 
     /*--- Diffusion terms ---*/
-    for (auto iSpecies = 0ul; iSpecies < nHeavy; iSpecies++) {
+    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
       Flux_Tensor[nSpecies+nDim][iDim]   += Flux_Tensor[iSpecies][iDim] * hs[iSpecies];
       Flux_Tensor[nSpecies+nDim+1][iDim] += Flux_Tensor[iSpecies][iDim] * val_eve[iSpecies];
     }
@@ -344,6 +355,10 @@ void CNEMONumerics::GetViscousProjJacs(const su2double *val_Mean_PrimVar,
 
     case 12:
       return COMPUTE_VISCOUS_JACS(12, 7);
+
+    /*--- AIR-11 in 2D: 11 species + 2 momentum + 2 energy equations. ---*/
+    case 15:
+      return COMPUTE_VISCOUS_JACS(15, 11);
 
     default:
       return COMPUTE_VISCOUS_JACS(DynamicSize,DynamicSize);

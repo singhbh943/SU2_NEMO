@@ -209,7 +209,7 @@ public:
   /*!
    * \brief Compute derivative of temperature w.r.t. conservative variables.
    */
-  void ComputedTdU(const su2double *V, su2double *val_dTdU);
+  virtual void ComputedTdU(const su2double *V, su2double *val_dTdU);
 
   /*!
    * \brief Compute derivative of vibrational temperature w.r.t. conservative variables.
@@ -236,7 +236,7 @@ public:
    */
   inline su2double ComputerhoCvtr() {
     rhoCvtr = 0.0;
-    for (iSpecies = 0; iSpecies < nHeavy; iSpecies++)
+    for (iSpecies = nEl; iSpecies < nSpecies; iSpecies++)
       rhoCvtr += rhos[iSpecies]*Cvtrs[iSpecies];
     return rhoCvtr;
   }
@@ -244,7 +244,7 @@ public:
   /*!
    * \brief Compute rhoCvve.
    */
-  su2double ComputerhoCvve();
+  virtual su2double ComputerhoCvve();
 
   /*!
    * \brief Get species molar mass.

@@ -28,6 +28,8 @@
 #include "../../include/output/CNEMOCompOutput.hpp"
 
 #include "../../../Common/include/geometry/CGeometry.hpp"
+#include "../../../Common/include/option_structure.hpp"
+#include "../../include/fluid/CNEMOGas.hpp"
 #include "../../include/solvers/CSolver.hpp"
 
 CNEMOCompOutput::CNEMOCompOutput(const CConfig *config, unsigned short nDim) : CFlowOutput(config, nDim, false) {
@@ -229,6 +231,69 @@ void CNEMOCompOutput::SetVolumeOutputFields(CConfig *config){
   for(iSpecies = 0; iSpecies < nSpecies; iSpecies++)
     AddVolumeOutput("MASSFRAC_" + std::to_string(iSpecies),  "MassFrac_" + std::to_string(iSpecies),  "AUXILIARY", "MassFrac_" + std::to_string(iSpecies));
 
+  /*
+   * Mutation++ species number densities [1/m^3].
+   *
+   * AIR-7 ordering:
+   *   0:e-, 1:N2, 2:O2, 3:NO, 4:N, 5:O, 6:NO+
+   *
+   * AIR-11 ordering:
+   *   0:e-, 1:N+, 2:O+, 3:NO+, 4:N2+, 5:O2+,
+   *   6:N, 7:O, 8:NO, 9:N2, 10:O2.
+   */
+  const vector<string> air7NumberDensityNames = {
+      "NumberDensity_e",
+      "NumberDensity_N2",
+      "NumberDensity_O2",
+      "NumberDensity_NO",
+      "NumberDensity_N",
+      "NumberDensity_O",
+      "NumberDensity_NOplus"};
+
+  const vector<string> air11NumberDensityNames = {
+      "NumberDensity_e",
+      "NumberDensity_Nplus",
+      "NumberDensity_Oplus",
+      "NumberDensity_NOplus",
+      "NumberDensity_N2plus",
+      "NumberDensity_O2plus",
+      "NumberDensity_N",
+      "NumberDensity_O",
+      "NumberDensity_NO",
+      "NumberDensity_N2",
+      "NumberDensity_O2"};
+
+  for (iSpecies = 0; iSpecies < nSpecies; iSpecies++) {
+
+    string fieldName =
+        "NumberDensity_" + std::to_string(iSpecies);
+
+    if (nSpecies == 7)
+      fieldName = air7NumberDensityNames[iSpecies];
+    else if (nSpecies == 11)
+      fieldName = air11NumberDensityNames[iSpecies];
+
+    AddVolumeOutput(
+        "NUMBER_DENSITY_" + std::to_string(iSpecies),
+        fieldName,
+        "AUXILIARY",
+        "Species number density [1/m^3]");
+  }
+
+  /*
+   * Convenient common alias for ionized AIR-7 and AIR-11.
+   * Mutation++ places e- at species index 0 for both mixtures.
+   */
+  if (config->GetIonization() &&
+      (nSpecies == 7 || nSpecies == 11)) {
+
+    AddVolumeOutput(
+        "ELECTRON_NUMBER_DENSITY",
+        "Electron_Number_Density",
+        "AUXILIARY",
+        "Electron number density [1/m^3]");
+  }
+
   // Grid velocity
   if (gridMovement){
     AddVolumeOutput("GRID_VELOCITY-X", "Grid_Velocity_x", "GRID_VELOCITY", "x-component of the grid velocity vector");
@@ -329,6 +394,51 @@ void CNEMOCompOutput::LoadVolumeData(CConfig *config, CGeometry *geometry, CSolv
 
   for(iSpecies = 0; iSpecies < nSpecies; iSpecies++)
     SetVolumeOutputValue("MASSFRAC_" + std::to_string(iSpecies),   iPoint, Node_Flow->GetSolution(iPoint, iSpecies)/Node_Flow->GetDensity(iPoint));
+
+  /*
+   * Convert rho_s [kg/m^3] to number density [1/m^3].
+   *
+   * NEMO molar masses are stored in kg/kmol and AVOGAD_CONSTANT
+   * is particles/kmol, therefore:
+   *
+   *   n_s = rho_s / M_s * N_A.
+   */
+  auto* nemoFluidModel =
+      static_cast<CNEMOGas*>(
+          solver[FLOW_SOL]->GetFluidModel());
+
+  auto& MolarMass =
+      nemoFluidModel->GetSpeciesMolarMass();
+
+  for (iSpecies = 0;
+       iSpecies < nSpecies;
+       iSpecies++) {
+
+    const su2double numberDensity =
+        Node_Flow->GetSolution(iPoint, iSpecies) /
+        MolarMass[iSpecies] *
+        AVOGAD_CONSTANT;
+
+    SetVolumeOutputValue(
+        "NUMBER_DENSITY_" +
+            std::to_string(iSpecies),
+        iPoint,
+        numberDensity);
+  }
+
+  if (config->GetIonization() &&
+      (nSpecies == 7 || nSpecies == 11)) {
+
+    const su2double electronNumberDensity =
+        Node_Flow->GetSolution(iPoint, 0) /
+        MolarMass[0] *
+        AVOGAD_CONSTANT;
+
+    SetVolumeOutputValue(
+        "ELECTRON_NUMBER_DENSITY",
+        iPoint,
+        electronNumberDensity);
+  }
 
   if (gridMovement){
     SetVolumeOutputValue("GRID_VELOCITY-X", iPoint, Node_Geo->GetGridVel(iPoint)[0]);

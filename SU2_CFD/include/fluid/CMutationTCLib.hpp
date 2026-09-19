@@ -80,6 +80,17 @@ public:
   vector<su2double>& ComputeSpeciesCvVibEle(su2double val_T) final;
 
   /*!
+   * \brief Compute the exact local derivative of V-E energy density with
+   * respect to Tve for the Mutation++ two-temperature energy definition.
+   */
+  su2double ComputerhoCvve() final;
+
+  /*!
+   * \brief Compute dT/dU using Mutation++'s own two-mode species energies.
+   */
+  void ComputedTdU(const su2double *V, su2double *val_dTdU) final;
+
+  /*!
    * \brief Compute mixture energies (total internal energy and vibrational energy).
    */
   vector<su2double>& ComputeMixtureEnergies() final;
@@ -100,6 +111,13 @@ public:
    * \brief Compute vibrational energy source term.
    */
   su2double ComputeEveSourceTerm() final;
+
+  /*!
+   * \brief Populate the Mutation++ V-E energy-transfer source Jacobian.
+   */
+  void GetEveSourceTermJacobian(const su2double *V, const su2double *eve, const su2double *cvve,
+                                const su2double *dTdU, const su2double *dTvedU,
+                                su2double **val_jacobian) final;
 
   /*!
    * \brief Compute species enthalpies.

@@ -32,6 +32,131 @@
 #include "../../include/fluid/CMutationTCLib.hpp"
 #include "../../include/fluid/CSU2TCLib.hpp"
 
+
+#include <cmath>
+#include <fstream>
+#include <sstream>
+
+/* NEMO_ADAPTIVE_RESTART_METADATA
+ *
+ * Restore the physical-time integration state associated with the newest
+ * restart solution.  This is deliberately separate from the legacy SU2
+ * metadata reader because that reader is called before NEMO
+ * non-dimensionalization and, for second-order dual time, initially refers
+ * to the older history level.
+ */
+namespace {
+
+void ReadNEMOAdaptivePhysicalTimeMetadata(
+    CConfig *config,
+    const string& filename) {
+
+  std::ifstream meta_file(filename);
+
+  if (!meta_file.good()) {
+    SU2_MPI::Error(
+        "Adaptive physical-time restart requires metadata file '" +
+        filename + "'.",
+        CURRENT_FUNCTION);
+  }
+
+  su2double current_dt = 0.0;
+  su2double previous_dt = 0.0;
+  su2double physical_time = 0.0;
+
+  bool found_current_dt = false;
+  bool found_previous_dt = false;
+  bool found_physical_time = false;
+
+  const string current_key =
+      "ADAPTIVE_PHYSICAL_DT_ND=";
+  const string previous_key =
+      "ADAPTIVE_PREVIOUS_PHYSICAL_DT_ND=";
+  const string time_key =
+      "ADAPTIVE_PHYSICAL_TIME_ND=";
+
+  string line;
+
+  while (std::getline(meta_file, line)) {
+
+    auto read_value =
+        [&](const string& key,
+            su2double& value,
+            bool& found) {
+
+      const auto pos = line.find(key);
+
+      if (pos == string::npos)
+        return;
+
+      std::stringstream value_stream(
+          line.substr(pos + key.size()));
+
+      value_stream >> value;
+
+      if (!value_stream.fail())
+        found = true;
+    };
+
+    read_value(current_key,
+               current_dt,
+               found_current_dt);
+
+    read_value(previous_key,
+               previous_dt,
+               found_previous_dt);
+
+    read_value(time_key,
+               physical_time,
+               found_physical_time);
+  }
+
+  meta_file.close();
+
+  if (!found_current_dt ||
+      !found_previous_dt ||
+      !found_physical_time) {
+
+    SU2_MPI::Error(
+        "Adaptive physical-time metadata is incomplete in '" +
+        filename + "'.",
+        CURRENT_FUNCTION);
+  }
+
+  const bool second_order =
+      config->GetTime_Marching() ==
+      TIME_MARCHING::DT_STEPPING_2ND;
+
+  if (!std::isfinite(current_dt) ||
+      !std::isfinite(previous_dt) ||
+      !std::isfinite(physical_time) ||
+      current_dt <= 0.0 ||
+      physical_time < 0.0 ||
+      (second_order && previous_dt <= 0.0)) {
+
+    SU2_MPI::Error(
+        "Invalid adaptive physical-time restart state in '" +
+        filename + "'.",
+        CURRENT_FUNCTION);
+  }
+
+  config->SetDelta_UnstTimeND(current_dt);
+  config->SetPrevious_Delta_UnstTimeND(previous_dt);
+  config->SetAdaptive_Physical_Time_AccumND(physical_time);
+  config->SetPhysicalTime(physical_time);
+
+  if (SU2_MPI::GetRank() == MASTER_NODE) {
+    cout << "[NEMO_ADAPTIVE_RESTART]"
+         << " dt=" << current_dt
+         << " previous_dt=" << previous_dt
+         << " physical_time=" << physical_time
+         << endl;
+  }
+}
+
+}  // namespace
+
+
 CNEMOEulerSolver::CNEMOEulerSolver(CGeometry *geometry, CConfig *config,
                            unsigned short iMesh, const bool navier_stokes) :
   CFVMFlowSolverBase<CNEMOEulerVariable, ENUM_REGIME::COMPRESSIBLE>(*geometry, *config) {
@@ -119,6 +244,45 @@ CNEMOEulerSolver::CNEMOEulerSolver(CGeometry *geometry, CConfig *config,
   /*--- Perform the non-dimensionalization for the flow equations using the
     specified reference values. ---*/
   SetNondimensionalization(config, iMesh);
+
+
+  /*
+   * Restore the adaptive physical-time state from the newest restart level.
+   *
+   * For BDF2 SU2 first uses RESTART_ITER-2 as the older history solution
+   * and subsequently loads RESTART_ITER-1 as the newest state.  The time
+   * integration metadata must therefore come from RESTART_ITER-1.
+   *
+   * This restoration is intentionally performed after NEMO
+   * non-dimensionalization because SetNondimensionalization() initializes
+   * Delta_UnstTimeND from the dimensional TIME_STEP.
+   */
+  if (restart &&
+      config->GetAdaptive_Physical_Time() &&
+      (iMesh == MESH_0) &&
+      (nZone <= 1)) {
+
+    if (config->GetRestart_Iter() == 0) {
+      SU2_MPI::Error(
+          "Adaptive physical-time restart requires RESTART_ITER > 0.",
+          CURRENT_FUNCTION);
+    }
+
+    const int adaptive_restart_iter =
+        SU2_TYPE::Int(config->GetRestart_Iter()) - 1;
+
+    string adaptive_meta_filename = "flow";
+
+    adaptive_meta_filename =
+        config->GetFilename(
+            adaptive_meta_filename,
+            ".meta",
+            adaptive_restart_iter);
+
+    ReadNEMOAdaptivePhysicalTimeMetadata(
+        config,
+        adaptive_meta_filename);
+  }
 
   /// TODO: This type of variables will be replaced.
 
@@ -570,9 +734,58 @@ void CNEMOEulerSolver::Upwind_Residual(CGeometry *geometry, CSolver **solver_con
       }
       su2double lim_ij = min(lim_i, lim_j);
 
+      /*
+       * Positivity-preserving scaling for NEMO species reconstruction.
+       *
+       * A physically admissible cell-centred state may contain species with
+       * exactly zero partial density.  Standard MUSCL reconstruction can then
+       * produce a small negative face value even when the underlying state is
+       * valid.  Instead of immediately rejecting the complete reconstructed
+       * state, scale each face reconstruction toward its cell-centred state
+       * until all reconstructed species partial densities are non-negative.
+       *
+       * The same scaling is applied to every reconstructed primitive variable
+       * on a given side of the face, preserving the reconstruction direction
+       * in primitive-variable space.  CheckNonPhys() below remains the final
+       * safeguard for pressure, temperatures, sound speed, non-finite values,
+       * and any remaining non-physical state.
+       */
+      su2double theta_i = 1.0;
+      su2double theta_j = 1.0;
+
+      const unsigned short RHOS_INDEX = nodes->GetRhosIndex();
+      constexpr su2double positivity_safety = 1.0 - 1.0e-12;
+
+      for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {
+
+        const auto iVar = RHOS_INDEX + iSpecies;
+
+        const su2double delta_i =
+            0.5 * lim_ij * Project_Grad_i[iVar];
+        const su2double delta_j =
+           -0.5 * lim_ij * Project_Grad_j[iVar];
+
+        if ((V_i[iVar] + delta_i < 0.0) && (delta_i < 0.0)) {
+          const su2double theta_species =
+              positivity_safety * V_i[iVar] / (-delta_i);
+          theta_i = min(theta_i, max(0.0, theta_species));
+        }
+
+        if ((V_j[iVar] + delta_j < 0.0) && (delta_j < 0.0)) {
+          const su2double theta_species =
+              positivity_safety * V_j[iVar] / (-delta_j);
+          theta_j = min(theta_j, max(0.0, theta_species));
+        }
+      }
+
       for (auto iVar = 0ul; iVar < nPrimVarGrad; iVar++) {
-        Primitive_i[iVar] = V_i[iVar] + 0.5 * lim_ij * Project_Grad_i[iVar];
-        Primitive_j[iVar] = V_j[iVar] - 0.5 * lim_ij * Project_Grad_j[iVar];
+        Primitive_i[iVar] =
+            V_i[iVar] +
+            theta_i * 0.5 * lim_ij * Project_Grad_i[iVar];
+
+        Primitive_j[iVar] =
+            V_j[iVar] -
+            theta_j * 0.5 * lim_ij * Project_Grad_j[iVar];
       }
 
       /*--- Check for non-physical solutions after reconstruction. If found, use the
@@ -737,15 +950,23 @@ bool CNEMOEulerSolver::CheckNonPhys(const su2double *V) const {
 
   /*--- Check whether state makes sense ---*/
   for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++)
-    if (V[RHOS_INDEX+iSpecies] < 0.0) nonPhys = true;
+    if (!std::isfinite(V[RHOS_INDEX+iSpecies]) ||
+        V[RHOS_INDEX+iSpecies] < 0.0)
+      nonPhys = true;
 
-  if (V[P_INDEX] < 0.0) nonPhys = true;
+  if (!std::isfinite(V[P_INDEX]) || V[P_INDEX] < 0.0)
+    nonPhys = true;
 
-  if (V[T_INDEX] < Tmin || V[T_INDEX] > Tmax) nonPhys = true;
+  if (!std::isfinite(V[T_INDEX]) ||
+      V[T_INDEX] < Tmin || V[T_INDEX] > Tmax)
+    nonPhys = true;
 
-  if (V[TVE_INDEX] < Tvemin || V[TVE_INDEX] > Tvemax) nonPhys = true;
+  if (!std::isfinite(V[TVE_INDEX]) ||
+      V[TVE_INDEX] < Tvemin || V[TVE_INDEX] > Tvemax)
+    nonPhys = true;
 
-  if (V[A_INDEX] < 0.0 ) nonPhys = true;
+  if (!std::isfinite(V[A_INDEX]) || V[A_INDEX] < 0.0)
+    nonPhys = true;
 
   return nonPhys;
 
@@ -805,6 +1026,7 @@ void CNEMOEulerSolver::Source_Residual(CGeometry *geometry, CSolver **solver_con
       if(!frozen){
         /*--- Compute the non-equilibrium chemistry ---*/
         auto residual = numerics->ComputeChemistry(config);
+
 
         /*--- Check for errors before applying source to the linear system ---*/
         err = CNumerics::CheckResidualNaNs(implicit, nVar, residual);
@@ -939,6 +1161,16 @@ void CNEMOEulerSolver::PrepareImplicitIteration(CGeometry *geometry, CSolver**, 
 void CNEMOEulerSolver::CompleteImplicitIteration(CGeometry *geometry, CSolver**, CConfig *config) {
   SU2_ZONE_SCOPED
 
+  /*
+   * Apply the standard NEMO conservative update limiter before the
+   * generic implicit solution update.  Thermochemical recovery is
+   * performed lazily by SetPrimVar() only for candidates that actually
+   * fail conservative-to-primitive conversion.
+   *
+   * Do not run Mutation++ conservative-to-primitive inversion for every
+   * grid point here: that serial all-point preflight dominates runtime
+   * for AIR-7/AIR-11 and duplicates SetPrimVar() recovery.
+   */
   CompleteImplicitIteration_impl<true>(geometry, config);
 }
 
@@ -967,19 +1199,23 @@ void CNEMOEulerSolver::ComputeUnderRelaxationFactor(const CConfig *config) {
         denom += fabs(nodes->GetSolution(iPoint, iVar));
 
         /*--- If final density/species, compute Under-relaxation ---*/
-        if (iVar == (config ->GetnSpecies()-1)){
-          su2double ratio = (num/(denom+EPS));
+        if (iVar == (config->GetnSpecies()-1)) {
+          const su2double ratio = num/(denom+EPS);
           if (ratio > allowableRatio) {
             localUnderRelaxation = min(allowableRatio / ratio, localUnderRelaxation);
           }
         }
+      }
 
-        /*--- Energy ---*/
-        if (iVar == (nVar-2)){
-          su2double ratio = fabs(LinSysSol[index]) / (fabs(nodes->GetSolution(iPoint, iVar)) + EPS);
-          if (ratio > allowableRatio) {
-            localUnderRelaxation = min(allowableRatio / ratio, localUnderRelaxation);
-          }
+      /*--- Total energy rhoE. This must be outside the species block. ---*/
+      if (iVar == (nVar-2)) {
+        const su2double ratio =
+            fabs(LinSysSol[index]) /
+            (fabs(nodes->GetSolution(iPoint, iVar)) + EPS);
+
+        if (ratio > allowableRatio) {
+          localUnderRelaxation =
+              min(allowableRatio / ratio, localUnderRelaxation);
         }
       }
     }

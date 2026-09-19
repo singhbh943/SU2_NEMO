@@ -86,9 +86,9 @@ CNEMOEulerVariable::CNEMOEulerVariable(su2double val_pressure,
   dPdU.resize(nPoint, nVar)      = su2double(0.0);
   dTdU.resize(nPoint, nVar)      = su2double(0.0);
   dTvedU.resize(nPoint, nVar)    = su2double(0.0);
-  Cvves.resize(nPoint, nSpecies) = su2double(0.0);
-  eves.resize(nPoint, nSpecies)  = su2double(0.0);
-  Gamma.resize(nPoint)           = su2double(0.0);
+  Cvves.resize(nPoint, nSpecies)      = su2double(0.0);
+  eves.resize(nPoint, nSpecies)       = su2double(0.0);
+  Gamma.resize(nPoint)                = su2double(0.0);
 
   /*--- Set mixture state ---*/
   fluidmodel->SetTDStatePTTv(val_pressure, val_massfrac, val_temperature, val_temperature_ve);
@@ -113,6 +113,14 @@ CNEMOEulerVariable::CNEMOEulerVariable(su2double val_pressure,
   }
 
   Solution_Old = Solution;
+
+  /*
+   * The constructor state is generated directly from a thermodynamic
+   * PT-Tve state and is therefore the initial last-known admissible
+   * conservative state.
+   */
+  Solution_Accepted.resize(nPoint, nVar);
+  Solution_Accepted = Solution;
 
   if (classical_rk4) Solution_New = Solution;
 
@@ -139,22 +147,122 @@ void CNEMOEulerVariable::SetVelocity2(unsigned long iPoint) {
 
 bool CNEMOEulerVariable::SetPrimVar(unsigned long iPoint, CFluidModel *FluidModel) {
 
-  unsigned short iVar;
-
   fluidmodel = static_cast<CNEMOGas*>(FluidModel);
 
-  /*--- Convert conserved to primitive variables ---*/
-  bool nonPhys = Cons2PrimVar(Solution[iPoint], Primitive[iPoint],
-                              dPdU[iPoint], dTdU[iPoint], dTvedU[iPoint], eves[iPoint], Cvves[iPoint]);
+  su2double candidateState[MAXNVAR];
+  for (auto iVar = 0u; iVar < nVar; ++iVar)
+    candidateState[iVar] = Solution(iPoint,iVar);
 
-  /*--- Reset solution to previous one, if nonphys ---*/
-  if (nonPhys) {
-    for (iVar = 0; iVar < nVar; iVar++)
-      Solution(iPoint,iVar) = Solution_Old(iPoint,iVar);
+  const su2double TSeed =
+      Primitive(iPoint,T_INDEX);
+  const su2double TveSeed =
+      Primitive(iPoint,TVE_INDEX);
 
-    /*--- Recompute Primitive from previous solution ---*/
-    Cons2PrimVar(Solution[iPoint], Primitive[iPoint],
-                   dPdU[iPoint], dTdU[iPoint], dTvedU[iPoint], eves[iPoint], Cvves[iPoint]);
+  const bool candidateNonPhys =
+      Cons2PrimVar(
+          Solution[iPoint],
+          Primitive[iPoint],
+          dPdU[iPoint],
+          dTdU[iPoint],
+          dTvedU[iPoint],
+          eves[iPoint],
+          Cvves[iPoint]);
+
+  bool storedStateNonPhys = candidateNonPhys;
+
+  /*
+   * Use the same thermochemical accepted-state recovery policy as the
+   * Navier--Stokes variable path instead of falling back to Solution_Old,
+   * which is an integration buffer and is not an admissibility record.
+   */
+  if (candidateNonPhys) {
+
+    bool recovered = false;
+    su2double alpha = 0.5;
+
+    constexpr unsigned short maxBacktrack = 16;
+
+    for (unsigned short iTry = 0;
+         iTry < maxBacktrack;
+         ++iTry) {
+
+      for (auto iVar = 0u; iVar < nVar; ++iVar) {
+        Solution(iPoint,iVar) =
+            Solution_Accepted(iPoint,iVar)
+            + alpha
+            * (candidateState[iVar]
+               - Solution_Accepted(iPoint,iVar));
+      }
+
+      Primitive(iPoint,T_INDEX)   = TSeed;
+      Primitive(iPoint,TVE_INDEX) = TveSeed;
+
+      const bool trialNonPhys =
+          Cons2PrimVar(
+              Solution[iPoint],
+              Primitive[iPoint],
+              dPdU[iPoint],
+              dTdU[iPoint],
+              dTvedU[iPoint],
+              eves[iPoint],
+              Cvves[iPoint]);
+
+      if (!trialNonPhys) {
+        recovered = true;
+        break;
+      }
+
+      alpha *= 0.5;
+    }
+
+    if (recovered) {
+
+      storedStateNonPhys = false;
+
+    } else {
+
+      for (auto iVar = 0u; iVar < nVar; ++iVar)
+        Solution(iPoint,iVar) =
+            Solution_Accepted(iPoint,iVar);
+
+      Primitive(iPoint,T_INDEX)   = TSeed;
+      Primitive(iPoint,TVE_INDEX) = TveSeed;
+
+      const bool acceptedNonPhys =
+          Cons2PrimVar(
+              Solution[iPoint],
+              Primitive[iPoint],
+              dPdU[iPoint],
+              dTdU[iPoint],
+              dTvedU[iPoint],
+              eves[iPoint],
+              Cvves[iPoint]);
+
+      if (acceptedNonPhys) {
+        std::cerr
+            << "[NEMO_EULER_ACCEPTED_STATE_FAILURE]"
+            << " point=" << iPoint
+            << " rhoE_accepted="
+            << Solution_Accepted(iPoint,nSpecies+nDim)
+            << " rhoEve_accepted="
+            << Solution_Accepted(iPoint,nSpecies+nDim+1)
+            << " T=" << Primitive(iPoint,T_INDEX)
+            << " Tve=" << Primitive(iPoint,TVE_INDEX)
+            << std::endl;
+
+        SU2_MPI::Error(
+            "NEMO Euler last-accepted thermochemical state failed "
+            "conservative-to-primitive recovery.",
+            CURRENT_FUNCTION);
+      }
+
+      storedStateNonPhys = false;
+    }
+  }
+
+  if (!storedStateNonPhys) {
+    for (auto iVar = 0u; iVar < nVar; ++iVar)
+      Solution_Accepted(iPoint,iVar) = Solution(iPoint,iVar);
   }
 
   /*--- Set additional point quantities ---*/
@@ -162,8 +270,113 @@ bool CNEMOEulerVariable::SetPrimVar(unsigned long iPoint, CFluidModel *FluidMode
 
   SetVelocity2(iPoint);
 
-  return nonPhys;
+  return candidateNonPhys;
 }
+
+
+su2double CNEMOEulerVariable::ComputeAdmissibleImplicitStep(
+    unsigned long iPoint,
+    const su2double *deltaU,
+    su2double initial_alpha,
+    CFluidModel *FluidModel,
+    unsigned short max_backtracks) {
+
+  if (initial_alpha <= 0.0) return 0.0;
+
+  /*
+   * Trial buffers are completely local.  In particular, Cons2PrimVar()
+   * is allowed to floor a trace negative species in Utrial without
+   * changing the live conservative solution stored in Solution.
+   */
+  std::vector<su2double> Utrial(nVar, 0.0);
+  std::vector<su2double> Vtrial(nSpecies + nDim + 10, 0.0);
+
+  std::vector<su2double> dPdU(nVar, 0.0);
+  std::vector<su2double> dTdU(nVar, 0.0);
+  std::vector<su2double> dTvedU(nVar, 0.0);
+
+  std::vector<su2double> eves(nSpecies, 0.0);
+  std::vector<su2double> Cvves(nSpecies, 0.0);
+
+  const su2double TSeed = Primitive(iPoint, T_INDEX);
+  const su2double TveSeed = Primitive(iPoint, TVE_INDEX);
+
+  /*
+   * Keep an exact copy of the currently accepted thermochemical state.
+   * Mutation++ ComputeTemperatures() changes the internal mixture state
+   * even when the energy inversion is later rejected, so every trial
+   * must begin from this same accepted state.
+   */
+  std::vector<su2double> live_rhos(nSpecies, 0.0);
+  for (unsigned short iSpecies = 0; iSpecies < nSpecies; ++iSpecies)
+    live_rhos[iSpecies] = Solution(iPoint, iSpecies);
+
+  auto restoreFluidState = [&]() {
+    fluidmodel->SetTDStateRhosTTv(live_rhos, TSeed, TveSeed);
+  };
+
+  restoreFluidState();
+
+  su2double alpha = initial_alpha;
+
+  /*
+   * Attempt initial_alpha first, followed by max_backtracks halvings.
+   * Thus max_backtracks = 0 still tests the original step once.
+   */
+  for (unsigned short attempt = 0;
+       attempt <= max_backtracks;
+       ++attempt) {
+
+    for (unsigned short iVar = 0; iVar < nVar; ++iVar) {
+      Utrial[iVar] =
+          Solution(iPoint, iVar) +
+          alpha * deltaU[iVar];
+    }
+
+    /*
+     * Every attempt must start from the same valid temperature seeds.
+     * A failed Mutation++ inversion must not poison the next trial.
+     */
+    std::fill(Vtrial.begin(), Vtrial.end(), 0.0);
+    Vtrial[T_INDEX] = TSeed;
+    Vtrial[TVE_INDEX] = TveSeed;
+
+    /*
+     * ComputeTemperatures() mutates Mutation++'s internal mixture state.
+     * Start every independent trial from the exact accepted state.
+     */
+    restoreFluidState();
+
+    const bool nonphysical =
+        Cons2PrimVar(
+            Utrial.data(),
+            Vtrial.data(),
+            dPdU.data(),
+            dTdU.data(),
+            dTvedU.data(),
+            eves.data(),
+            Cvves.data());
+
+    /*
+     * Whether this trial succeeds or fails, do not leak its Mutation++
+     * state into the next trial or back to the caller.
+     */
+    restoreFluidState();
+
+    if (!nonphysical &&
+        std::isfinite(Vtrial[T_INDEX]) &&
+        std::isfinite(Vtrial[TVE_INDEX]) &&
+        Vtrial[T_INDEX] > 0.0 &&
+        Vtrial[TVE_INDEX] > 0.0) {
+      return alpha;
+    }
+
+    alpha *= 0.5;
+  }
+
+  return 0.0;
+}
+
 
 bool CNEMOEulerVariable::Cons2PrimVar(su2double *U, su2double *V,
                                       su2double *val_dPdU, su2double *val_dTdU,
@@ -191,21 +404,27 @@ bool CNEMOEulerVariable::Cons2PrimVar(su2double *U, su2double *V,
   su2double rhoE   = U[nSpecies+nDim];     // Density * energy [J/m3]
   su2double rhoEve = U[nSpecies+nDim+1];   // Density * energy_ve [J/m3]
 
-  /*--- Assign species & mixture density ---*/
-  // Note: if any species densities are < 0, these values are re-assigned
-  //       in the primitive AND conserved vectors to ensure positive density
+  /*--- Assign species & mixture density.
+   *
+   * Preserve the original NEMO treatment of an individual species
+   * undershoot: floor only that species instead of rejecting the
+   * complete conservative state.  This is important for trace charged
+   * species in AIR-11.
+   *---*/
   V[RHO_INDEX] = 0.0;
-  for (iSpecies = 0; iSpecies < nSpecies; iSpecies++) {
+
+  for (iSpecies = 0; iSpecies < nSpecies; ++iSpecies) {
+
     if (U[iSpecies] < 0.0) {
-      U[iSpecies]            = 1E-20;
+      U[iSpecies] = 1E-20;
       V[RHOS_INDEX+iSpecies] = 1E-20;
-      rhos[iSpecies]         = 1E-20;
-    //nonPhys                = true;
+      rhos[iSpecies] = 1E-20;
     } else {
       V[RHOS_INDEX+iSpecies] = U[iSpecies];
-      rhos[iSpecies]         = U[iSpecies];
+      rhos[iSpecies] = U[iSpecies];
     }
-    V[RHO_INDEX]            += U[iSpecies];
+
+    V[RHO_INDEX] += U[iSpecies];
   }
 
   // Rename for convenience

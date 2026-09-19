@@ -152,6 +152,22 @@ private:
   su2double CL_Target;         /*!< \brief Fixed Cl mode Target Cl. */
   su2double Confinement_Param; /*!< \brief Confinement paramenter for Vorticity Confinement method. */
   TIME_MARCHING TimeMarching;        /*!< \brief Steady or unsteady (time stepping or dual time stepping) computation. */
+
+  bool Adaptive_Physical_Time;       /*!< \brief Enable variable physical time step for dual-time integration. */
+  su2double Physical_Time_Step_Growth; /*!< \brief Maximum physical time-step growth factor per physical step. */
+  su2double Max_Physical_Time_Step;  /*!< \brief Maximum dimensional physical time step (s). */
+
+  /*
+   * Previous physical step in non-dimensional units.
+   * Runtime state used by variable-step BDF2; this is not a config-file option.
+   */
+  su2double Previous_Delta_UnstTimeND = 0.0;
+
+  /*
+   * Accumulated non-dimensional physical time for adaptive stepping.
+   * Fixed-dt cases continue to use the legacy TimeIter*dt relation.
+   */
+  su2double Adaptive_Physical_Time_AccumND = 0.0;
   su2double FixAzimuthalLine;        /*!< \brief Fix an azimuthal line due to misalignments of the nearfield. */
   su2double **DV_Value;              /*!< \brief Previous value of the design variable. */
   su2double Venkat_LimiterCoeff;     /*!< \brief Limiter coefficient */
@@ -2967,6 +2983,25 @@ public:
    * \return CFL number for unsteady simulations.
    */
   su2double GetUnst_CFL(void) const { return Unst_CFL; }
+
+  /*!
+   * \brief Whether variable physical time stepping is enabled.
+   */
+  bool GetAdaptive_Physical_Time(void) const { return Adaptive_Physical_Time; }
+
+  /*!
+   * \brief Maximum allowed multiplicative increase in physical dt.
+   */
+  su2double GetPhysical_Time_Step_Growth(void) const {
+    return Physical_Time_Step_Growth;
+  }
+
+  /*!
+   * \brief Maximum dimensional physical time step in seconds.
+   */
+  su2double GetMax_Physical_Time_Step(void) const {
+    return Max_Physical_Time_Step;
+  }
 
   /*!
    * \brief Get information about element reorientation
@@ -6083,6 +6118,34 @@ public:
    * \param[in] val_delta_unsttimend - Value of the unsteady time step using CFL number.
    */
   void SetDelta_UnstTimeND(su2double val_delta_unsttimend) { Delta_UnstTimeND = val_delta_unsttimend; }
+
+  /*!
+   * \brief Previous non-dimensional physical time step used by variable-step BDF2.
+   */
+  su2double GetPrevious_Delta_UnstTimeND(void) const {
+    return Previous_Delta_UnstTimeND;
+  }
+
+  /*!
+   * \brief Store previous non-dimensional physical time step.
+   */
+  void SetPrevious_Delta_UnstTimeND(su2double val_dt) {
+    Previous_Delta_UnstTimeND = val_dt;
+  }
+
+  /*!
+   * \brief Accumulated non-dimensional physical time.
+   */
+  su2double GetAdaptive_Physical_Time_AccumND(void) const {
+    return Adaptive_Physical_Time_AccumND;
+  }
+
+  /*!
+   * \brief Set accumulated non-dimensional physical time.
+   */
+  void SetAdaptive_Physical_Time_AccumND(su2double val_time) {
+    Adaptive_Physical_Time_AccumND = val_time;
+  }
 
   /*!
    * \brief If we are performing an unsteady simulation, this is the

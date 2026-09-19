@@ -223,6 +223,19 @@ public:
     su2double RuSI= UNIVERSAL_GAS_CONSTANT;
     su2double Ru  = 1000.0*RuSI;
     const auto& Ds  = val_diffusion_coeff;
+
+    /*
+     * val_Mean_PrimVar stores species mass fractions in this routine.
+     * Put the numerics-owned thermochemical model at the same mean edge
+     * state before requesting enthalpies or heat capacities.
+     */
+    vector<su2double> state_rhos(nSpecies, 0.0);
+    const su2double rho_mean = val_Mean_PrimVar[RHO_INDEX];
+    for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies)
+      state_rhos[iSpecies] =
+          rho_mean * val_Mean_PrimVar[RHOS_INDEX+iSpecies];
+
+    fluidmodel->SetTDStateRhosTTv(state_rhos, T, Tve);
     const auto& hs = fluidmodel->ComputeSpeciesEnthalpy(T, Tve, val_Mean_Eve);
     const auto& Cvtr = fluidmodel->GetSpeciesCvTraRot();
     const auto& Ms = fluidmodel->GetSpeciesMolarMass();

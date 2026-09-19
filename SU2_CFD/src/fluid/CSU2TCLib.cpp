@@ -1180,7 +1180,7 @@ vector<su2double>& CSU2TCLib::GetSpeciesCvTraRot(){
 
   if(ionization) Cvtrs[0] = 0.0;
 
-  for (iSpecies = nEl; iSpecies < nHeavy; iSpecies++)
+  for (iSpecies = nEl; iSpecies < nSpecies; iSpecies++)
     Cvtrs[iSpecies] = (3.0/2.0 + RotationModes[iSpecies]/2.0) * Ru/MolarMass[iSpecies];
 
   return Cvtrs;

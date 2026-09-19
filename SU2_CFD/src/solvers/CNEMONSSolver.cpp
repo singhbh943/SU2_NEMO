@@ -537,12 +537,7 @@ void CNEMONSSolver::BC_IsothermalNonCatalytic_Wall(CGeometry *geometry,
   SU2_ZONE_SCOPED
 
   const bool implicit = (config->GetKind_TimeIntScheme() == EULER_IMPLICIT);
-  const bool ionization = config->GetIonization();
   su2double UnitNormal[MAXNDIM] = {0.0};
-
-  if (ionization) {
-    SU2_MPI::Error("NEED TO TAKE A CLOSER LOOK AT THE JACOBIAN W/ IONIZATION",CURRENT_FUNCTION);
-  }
 
   /*--- Define 'proportional control' constant ---*/
   const su2double C = 5;
@@ -623,10 +618,13 @@ void CNEMONSSolver::BC_IsothermalNonCatalytic_Wall(CGeometry *geometry,
       const auto dTvedU = nodes->GetdTvedU(iPoint);
       const su2double theta = GeometryToolbox::SquaredNorm(nDim, UnitNormal);
 
+      const su2double weak_factor = 1.0 - C;
       for (auto iVar = 0ul; iVar < nVar; iVar++) {
-        Jacobian_i[nSpecies+nDim][iVar]   = -(ktr*theta/dist_ij*dTdU[iVar] +
-                                              kve*theta/dist_ij*dTvedU[iVar])*Area;
-        Jacobian_i[nSpecies+nDim+1][iVar] = - kve*theta/dist_ij*dTvedU[iVar]*Area;
+        Jacobian_i[nSpecies+nDim][iVar] =
+            weak_factor*(ktr*theta*dTdU[iVar] +
+                         kve*theta*dTvedU[iVar])*Area/dist_ij;
+        Jacobian_i[nSpecies+nDim+1][iVar] =
+            weak_factor*kve*theta*dTvedU[iVar]*Area/dist_ij;
       }
     } // implicit
 
@@ -639,7 +637,7 @@ void CNEMONSSolver::BC_IsothermalNonCatalytic_Wall(CGeometry *geometry,
     if (implicit) {
       Jacobian.SubtractBlock2Diag(iPoint, Jacobian_i);
 
-      for (auto iVar = 1u; iVar <= nDim; iVar++) {
+      for (auto iVar = nSpecies; iVar < nSpecies+nDim; iVar++) {
         Jacobian.DeleteValsRowi(iPoint, iVar);
       }
     }
@@ -803,10 +801,6 @@ void CNEMONSSolver::BC_IsothermalCatalytic_Wall(CGeometry *geometry,
 
       } else {
 
-        if (implicit) {
-          SU2_MPI::Error("Implicit not currently available for partially catalytic wall.",CURRENT_FUNCTION);
-        }
-
         /*--- Identify the boundary ---*/
         string Marker_Tag = config->GetMarker_All_TagBound(val_marker);
 
@@ -820,7 +814,7 @@ void CNEMONSSolver::BC_IsothermalCatalytic_Wall(CGeometry *geometry,
         const auto& RxnTable = FluidModel->GetCatalyticRecombination();
 
         /*--- Common catalytic flux factor ---*/
-        const su2double factor = gam*rho*sqrt(RuSI*Tw/2/PI_NUMBER)*Area;
+        const su2double factor = gam*rho*sqrt(Ru*Tw/2/PI_NUMBER)*Area;
 
         /*--- Compute catalytic recombination flux ---*/
         // Ref: 10.2514/6.2022-1636
@@ -829,11 +823,158 @@ void CNEMONSSolver::BC_IsothermalCatalytic_Wall(CGeometry *geometry,
           int Index = SU2_TYPE::Int(RxnTable(iSpecies,1));
           Res_Visc[iSpecies] = RxnTable(iSpecies,0)*factor*Vi[Index]/Vi[RHO_INDEX]*sqrt(1/Ms[Index]);
         }
+
+        if (implicit) {
+          /*--- The partial-catalytic species flux can be written directly in
+           * conservative variables because rho*Y_index = rho_index:
+           *   w_s = a_s*gam*sqrt(Ru*Tw/(2*pi*M_index))*rho_index*Area.
+           * Hence its species Jacobian is sparse and exact. ---*/
+          for (auto iVar = 0ul; iVar < nVar; iVar++)
+            for (auto jVar = 0ul; jVar < nVar; jVar++)
+              Jacobian_i[iVar][jVar] = 0.0;
+
+          for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {
+            const auto Index = SU2_TYPE::Int(RxnTable(iSpecies,1));
+            Jacobian_i[iSpecies][Index] = RxnTable(iSpecies,0)*gam*
+                sqrt(Ru*Tw/(2.0*PI_NUMBER*Ms[Index]))*Area;
+          }
+
+          /*
+           * Mutation++'s ChemNonEqTTv state inversion is a coupled
+           * two-energy problem.  Build the local 2x2 thermodynamic
+           * linearization directly from the same species enthalpy and
+           * V-E energy functions used by the residual instead of relying
+           * on the generic SU2 temperature derivatives.
+           */
+          vector<su2double> state_rhos(nSpecies, 0.0);
+          for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies)
+            state_rhos[iSpecies] = Vi[RHOS_INDEX+iSpecies];
+
+          const su2double T0 = Vi[T_INDEX];
+          const su2double Tve0 = Vi[TVE_INDEX];
+          const su2double rel_step = 2.0e-6;
+          const su2double dT = rel_step*max(abs(T0), su2double(1.0));
+          const su2double dTve = rel_step*max(abs(Tve0), su2double(1.0));
+
+          vector<su2double> h0(nSpecies, 0.0), eve0(nSpecies, 0.0);
+          vector<su2double> hTp(nSpecies, 0.0), hTm(nSpecies, 0.0);
+          vector<su2double> hVp(nSpecies, 0.0), hVm(nSpecies, 0.0);
+          vector<su2double> eTp(nSpecies, 0.0), eTm(nSpecies, 0.0);
+          vector<su2double> eVp(nSpecies, 0.0), eVm(nSpecies, 0.0);
+
+          auto sample_thermo = [&](su2double Ts, su2double Tves,
+                                   vector<su2double>& hout,
+                                   vector<su2double>& eout) {
+            FluidModel->SetTDStateRhosTTv(state_rhos, Ts, Tves);
+            const auto& eref = FluidModel->ComputeSpeciesEve(Tves);
+            for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies)
+              eout[iSpecies] = eref[iSpecies];
+            const auto& href =
+                FluidModel->ComputeSpeciesEnthalpy(Ts, Tves, eout.data());
+            for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies)
+              hout[iSpecies] = href[iSpecies];
+          };
+
+          sample_thermo(T0, Tve0, h0, eve0);
+          sample_thermo(T0+dT, Tve0, hTp, eTp);
+          sample_thermo(T0-dT, Tve0, hTm, eTm);
+          sample_thermo(T0, Tve0+dTve, hVp, eVp);
+          sample_thermo(T0, Tve0-dTve, hVm, eVm);
+
+          vector<su2double> dhdT(nSpecies, 0.0), dhdTve(nSpecies, 0.0);
+          vector<su2double> dedT(nSpecies, 0.0), dedTve(nSpecies, 0.0);
+          vector<su2double> eTotal(nSpecies, 0.0);
+          vector<su2double> deTotaldT(nSpecies, 0.0), deTotaldTve(nSpecies, 0.0);
+
+          su2double A = 0.0, B = 0.0, C = 0.0, D = 0.0;
+
+          for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies) {
+            dhdT[iSpecies] = (hTp[iSpecies]-hTm[iSpecies])/(2.0*dT);
+            dhdTve[iSpecies] = (hVp[iSpecies]-hVm[iSpecies])/(2.0*dTve);
+            dedT[iSpecies] = (eTp[iSpecies]-eTm[iSpecies])/(2.0*dT);
+            dedTve[iSpecies] = (eVp[iSpecies]-eVm[iSpecies])/(2.0*dTve);
+
+            const bool electron = config->GetIonization() && (iSpecies == 0);
+            const su2double species_temperature = electron ? Tve0 : T0;
+
+            eTotal[iSpecies] =
+                h0[iSpecies] - Ru/Ms[iSpecies]*species_temperature;
+
+            deTotaldT[iSpecies] =
+                dhdT[iSpecies] - (electron ? 0.0 : Ru/Ms[iSpecies]);
+
+            deTotaldTve[iSpecies] =
+                dhdTve[iSpecies] - (electron ? Ru/Ms[iSpecies] : 0.0);
+
+            A += state_rhos[iSpecies]*deTotaldT[iSpecies];
+            B += state_rhos[iSpecies]*deTotaldTve[iSpecies];
+            C += state_rhos[iSpecies]*dedT[iSpecies];
+            D += state_rhos[iSpecies]*dedTve[iSpecies];
+          }
+
+          const su2double det = A*D-B*C;
+          const su2double det_scale =
+              max(su2double(1.0), max(abs(A*D), abs(B*C)));
+
+          if ((!std::isfinite(det)) || (abs(det) <= 1.0e-14*det_scale))
+            SU2_MPI::Error("Singular thermodynamic Jacobian at partially catalytic wall.",
+                           CURRENT_FUNCTION);
+
+          vector<su2double> wall_dTdU(nVar, 0.0);
+          vector<su2double> wall_dTvedU(nVar, 0.0);
+
+          su2double velocity2 = 0.0;
+          for (auto iDim = 0ul; iDim < nDim; ++iDim)
+            velocity2 += nodes->GetVelocity(iPoint,iDim)*nodes->GetVelocity(iPoint,iDim);
+
+          for (auto jVar = 0ul; jVar < nVar; ++jVar) {
+            su2double rhs0 = 0.0;
+            su2double rhs1 = 0.0;
+
+            if (jVar < nSpecies) {
+              rhs0 = 0.5*velocity2 - eTotal[jVar];
+              rhs1 = -eve0[jVar];
+            } else if (jVar < nSpecies+nDim) {
+              const auto iDim = jVar-nSpecies;
+              rhs0 = -nodes->GetVelocity(iPoint,iDim);
+            } else if (jVar == nSpecies+nDim) {
+              rhs0 = 1.0;
+            } else if (jVar == nSpecies+nDim+1) {
+              rhs1 = 1.0;
+            }
+
+            wall_dTdU[jVar] = (rhs0*D-B*rhs1)/det;
+            wall_dTvedU[jVar] = (A*rhs1-C*rhs0)/det;
+          }
+
+          for (auto jVar = 0ul; jVar < nVar; ++jVar) {
+            for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies) {
+              Jacobian_i[nSpecies+nDim][jVar] +=
+                  h0[iSpecies]*Jacobian_i[iSpecies][jVar] +
+                  Res_Visc[iSpecies]*
+                      (dhdT[iSpecies]*wall_dTdU[jVar] +
+                       dhdTve[iSpecies]*wall_dTvedU[jVar]);
+
+              Jacobian_i[nSpecies+nDim+1][jVar] +=
+                  eve0[iSpecies]*Jacobian_i[iSpecies][jVar] +
+                  Res_Visc[iSpecies]*
+                      (dedT[iSpecies]*wall_dTdU[jVar] +
+                       dedTve[iSpecies]*wall_dTvedU[jVar]);
+            }
+          }
+
+          /*--- Restore the Mutation++ state and its species-enthalpy buffer. ---*/
+          FluidModel->SetTDStateRhosTTv(state_rhos, T0, Tve0);
+          FluidModel->ComputeSpeciesEnthalpy(T0, Tve0, eves);
+
+          /*--- Apply the catalytic-wall contribution to the linear system. ---*/
+          Jacobian.SubtractBlock(iPoint, iPoint, Jacobian_i);
+        }
       }
 
       for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {
-        Res_Visc[nSpecies+nDim]   += (Res_Visc[iSpecies]*hs[iSpecies])*Area;
-        Res_Visc[nSpecies+nDim+1] += (Res_Visc[iSpecies]*eves[iSpecies])*Area;
+        Res_Visc[nSpecies+nDim]   += Res_Visc[iSpecies]*hs[iSpecies];
+        Res_Visc[nSpecies+nDim+1] += Res_Visc[iSpecies]*eves[iSpecies];
       }
 
       /*--- Viscous contribution to the residual at the wall ---*/

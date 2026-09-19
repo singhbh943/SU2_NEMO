@@ -83,6 +83,12 @@ class CFVMFlowSolverBase : public CSolver {
   su2double Global_Delta_Time = 0.0, /*!< \brief Time-step for TIME_STEPPING time marching strategy. */
   Global_Delta_UnstTimeND = 0.0;     /*!< \brief Unsteady time step for the dual time strategy. */
 
+  /*
+   * Scratch storage for the convective physical Courant controller.
+   * Stores sum_f |u_f . S_f| for each node-centered dual volume.
+   */
+  std::vector<su2double> Adaptive_Physical_Flux_Sum;
+
   unsigned long ErrorCounter = 0;    /*!< \brief Counter for number of un-physical states. */
 
   /*!
@@ -574,27 +580,325 @@ class CFVMFlowSolverBase : public CSolver {
 
     }
 
-    /*--- Recompute the unsteady time step for the dual time strategy if the unsteady CFL is different from 0.
-     * This is only done once because in dual time the time step cannot be variable. ---*/
+    /*
+     * Physical dt for dual-time integration.
+     *
+     * Legacy behavior is preserved when ADAPTIVE_PHYSICAL_TIME=NO:
+     * the CFL-based physical step is computed only once.
+     *
+     * Adaptive mode recomputes the candidate physical step at the first
+     * inner iteration of every physical-time iteration.  The initial step
+     * remains TIME_STEP; subsequent steps are limited by:
+     *
+     *   min(dt_CFL, growth*dt_old, dt_max).
+     */
+    const bool adaptive_physical_time =
+        config->GetAdaptive_Physical_Time();
 
-    if (dual_time && (Iteration == config->GetRestart_Iter()) && (config->GetUnst_CFL() != 0.0) && (iMesh == MESH_0)) {
+    if (dual_time && (config->GetUnst_CFL() != 0.0) &&
+        (iMesh == MESH_0) &&
+        (!adaptive_physical_time &&
+         (Iteration == config->GetRestart_Iter()))) {
 
-      /*--- Thread-local variable for reduction. ---*/
       su2double glbDtND = 1e30;
 
       SU2_OMP_FOR_(schedule(static,omp_chunk_size) SU2_NOWAIT)
       for (auto iPoint = 0ul; iPoint < nPointDomain; iPoint++) {
-        glbDtND = min(glbDtND, config->GetUnst_CFL()*Global_Delta_Time / nodes->GetLocalCFL(iPoint));
+        glbDtND = min(
+            glbDtND,
+            config->GetUnst_CFL()*Global_Delta_Time /
+            nodes->GetLocalCFL(iPoint));
       }
       END_SU2_OMP_FOR
+
       atomicMin(glbDtND, Global_Delta_UnstTimeND);
 
       BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
       {
-        SU2_MPI::Allreduce(&Global_Delta_UnstTimeND, &glbDtND, 1, MPI_DOUBLE, MPI_MIN, SU2_MPI::GetComm());
-        Global_Delta_UnstTimeND = glbDtND;
+        SU2_MPI::Allreduce(
+            &Global_Delta_UnstTimeND, &glbDtND,
+            1, MPI_DOUBLE, MPI_MIN, SU2_MPI::GetComm());
 
+        Global_Delta_UnstTimeND = glbDtND;
         config->SetDelta_UnstTimeND(Global_Delta_UnstTimeND);
+      }
+      END_SU2_OMP_SAFE_GLOBAL_ACCESS
+    }
+
+    if (dual_time && adaptive_physical_time &&
+        (config->GetUnst_CFL() != 0.0) &&
+        (iMesh == MESH_0) &&
+        (config->GetInnerIter() == 0)) {
+
+      /*
+       * hy2Foam/OpenFOAM-style physical Courant controller.
+       *
+       * This is deliberately different from SU2's pseudo-time CFL:
+       *
+       *   Co_i = dt/(2 V_i) *
+       *          sum_f |u_f . S_f|
+       *
+       * The acoustic speed and viscous spectral radius are NOT included
+       * in this physical Courant number.
+       *
+       * Variable-step BDF2 is handled separately in
+       * SetResidual_DualTime().
+       */
+
+      if (dynamic_grid) {
+        SU2_MPI::Error(
+            "ADAPTIVE_PHYSICAL_TIME currently supports static grids only.",
+            CURRENT_FUNCTION);
+      }
+
+      /*
+       * Adaptive restart state (current dt, previous dt and accumulated
+       * physical time) is restored from the flow restart metadata.
+       */
+      const su2double old_dt =
+          config->GetDelta_UnstTimeND();
+
+      const su2double max_dt =
+          config->GetMax_Physical_Time_Step() /
+          config->GetTime_Ref();
+
+      const su2double targetCo =
+          config->GetUnst_CFL();
+
+      const su2double growthCap =
+          config->GetPhysical_Time_Step_Growth();
+
+      if ((old_dt <= 0.0) ||
+          (max_dt <= 0.0) ||
+          (targetCo <= 0.0) ||
+          (growthCap < 1.0)) {
+
+        SU2_MPI::Error(
+            "Adaptive physical-time stepping requires positive TIME_STEP, "
+            "UNST_CFL_NUMBER, MAX_PHYSICAL_TIME_STEP and "
+            "PHYSICAL_TIME_STEP_GROWTH >= 1.",
+            CURRENT_FUNCTION);
+      }
+
+      /*
+       * Resize/reset shared node scratch storage.
+       */
+      BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
+      {
+        Adaptive_Physical_Flux_Sum.assign(
+            nPointDomain, 0.0);
+      }
+      END_SU2_OMP_SAFE_GLOBAL_ACCESS
+
+      /*
+       * Internal dual faces.
+       *
+       * The SU2 edge normal already contains face area, therefore
+       * GetProjVel(...,Normal) has units of velocity*area in dimensional
+       * form, exactly what is needed for the Courant flux sum.
+       */
+      SU2_OMP_FOR_(schedule(static,omp_chunk_size))
+      for (auto iPoint = 0ul;
+           iPoint < nPointDomain;
+           ++iPoint) {
+
+        su2double fluxSum = 0.0;
+
+        for (unsigned short iNeigh = 0;
+             iNeigh < geometry->nodes->GetnPoint(iPoint);
+             ++iNeigh) {
+
+          const auto jPoint =
+              geometry->nodes->GetPoint(iPoint, iNeigh);
+
+          const auto iEdge =
+              geometry->nodes->GetEdge(iPoint, iNeigh);
+
+          const auto Normal =
+              geometry->edges->GetNormal(iEdge);
+
+          const su2double Mean_ProjVel =
+              0.5 *
+              (nodes->GetProjVel(iPoint, Normal) +
+               nodes->GetProjVel(jPoint, Normal));
+
+          fluxSum += fabs(Mean_ProjVel);
+        }
+
+        Adaptive_Physical_Flux_Sum[iPoint] =
+            fluxSum;
+      }
+      END_SU2_OMP_FOR
+
+      /*
+       * Physical boundary faces.
+       *
+       * Internal and periodic interfaces are excluded.  Wall and symmetry
+       * faces may be included safely: their normal physical velocity should
+       * be zero, while farfield/outlet faces contribute their actual mass-
+       * transport velocity scale.
+       */
+      BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
+      {
+        for (unsigned short iMarker = 0;
+             iMarker < geometry->GetnMarker();
+             ++iMarker) {
+
+          const auto kindBC =
+              config->GetMarker_All_KindBC(iMarker);
+
+          if ((kindBC == INTERNAL_BOUNDARY) ||
+              (kindBC == PERIODIC_BOUNDARY))
+            continue;
+
+          for (unsigned long iVertex = 0;
+               iVertex < geometry->GetnVertex(iMarker);
+               ++iVertex) {
+
+            const auto iPoint =
+                geometry->vertex[iMarker][iVertex]->GetNode();
+
+            if (!geometry->nodes->GetDomain(iPoint))
+              continue;
+
+            if (iPoint >= nPointDomain)
+              continue;
+
+            const auto Normal =
+                geometry->vertex[iMarker][iVertex]->GetNormal();
+
+            Adaptive_Physical_Flux_Sum[iPoint] +=
+                fabs(nodes->GetProjVel(iPoint, Normal));
+          }
+        }
+      }
+      END_SU2_OMP_SAFE_GLOBAL_ACCESS
+
+      /*
+       * Compute the maximum physical Courant number associated with the
+       * current physical dt.
+       */
+      ompMasterAssignBarrier(
+          Global_Delta_UnstTimeND, 0.0);
+
+      su2double localMaxCo = 0.0;
+
+      SU2_OMP_FOR_(schedule(static,omp_chunk_size) SU2_NOWAIT)
+      for (auto iPoint = 0ul;
+           iPoint < nPointDomain;
+           ++iPoint) {
+
+        const su2double Vol =
+            geometry->nodes->GetVolume(iPoint);
+
+        if (Vol <= 0.0)
+          continue;
+
+        const su2double localCo =
+            0.5 * old_dt *
+            Adaptive_Physical_Flux_Sum[iPoint] /
+            Vol;
+
+        localMaxCo =
+            max(localMaxCo, localCo);
+      }
+      END_SU2_OMP_FOR
+
+      atomicMax(
+          localMaxCo,
+          Global_Delta_UnstTimeND);
+
+      BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
+      {
+        su2double globalMaxCo = 0.0;
+
+        SU2_MPI::Allreduce(
+            &Global_Delta_UnstTimeND,
+            &globalMaxCo,
+            1,
+            MPI_DOUBLE,
+            MPI_MAX,
+            SU2_MPI::GetComm());
+
+        /*
+         * OpenFOAM-style controller:
+         *
+         *   maxDeltaTFact = targetCo / currentCo
+         *
+         * reductions are immediate; increases are damped.
+         *
+         * PHYSICAL_TIME_STEP_GROWTH is the absolute growth cap.
+         */
+        const su2double coRatio =
+            targetCo /
+            (globalMaxCo + EPS);
+
+        const su2double growthFactor =
+            min(
+                coRatio,
+                min(
+                    1.0 + 0.1*coRatio,
+                    growthCap));
+
+        su2double new_dt =
+            min(
+                old_dt*growthFactor,
+                max_dt);
+
+        if (new_dt <= 0.0) {
+          SU2_MPI::Error(
+              "Physical Courant controller produced dt <= 0.",
+              CURRENT_FUNCTION);
+        }
+
+        /*
+         * Previous dt is required by variable-step BDF2.
+         */
+        config->SetPrevious_Delta_UnstTimeND(
+            old_dt);
+
+        config->SetDelta_UnstTimeND(
+            new_dt);
+
+        Global_Delta_UnstTimeND =
+            new_dt;
+
+        /*
+         * With frozen velocity during controller evaluation, this is the
+         * Courant number corresponding to the newly selected dt.
+         */
+        const su2double estimatedNewCo =
+            globalMaxCo *
+            new_dt /
+            old_dt;
+
+        if (SU2_MPI::GetRank() == MASTER_NODE) {
+
+          cout
+              << "[NEMO_PHYSICAL_CO]"
+              << " time_iter="
+              << config->GetTimeIter()
+
+              << " Co_old="
+              << globalMaxCo
+
+              << " targetCo="
+              << targetCo
+
+              << " factor="
+              << growthFactor
+
+              << " dt_old="
+              << old_dt*config->GetTime_Ref()
+
+              << " dt_new="
+              << new_dt*config->GetTime_Ref()
+
+              << " Co_new_est="
+              << estimatedNewCo
+
+              << endl;
+        }
       }
       END_SU2_OMP_SAFE_GLOBAL_ACCESS
     }

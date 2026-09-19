@@ -85,6 +85,27 @@ void CSinglezoneDriver::StartSolver() {
 
     Update();
 
+
+    /*
+     * Adaptive physical time is accumulated after each completed step.
+     * Update() has already advanced the physical solution from n to n+1,
+     * so Monitor() and Output() see the new physical time.
+     */
+    if ((config_container[ZONE_0]->GetTime_Marching() !=
+         TIME_MARCHING::STEADY) &&
+        config_container[ZONE_0]->GetAdaptive_Physical_Time()) {
+
+      const su2double new_physical_time =
+          config_container[ZONE_0]->GetAdaptive_Physical_Time_AccumND() +
+          config_container[ZONE_0]->GetDelta_UnstTimeND();
+
+      config_container[ZONE_0]->
+          SetAdaptive_Physical_Time_AccumND(new_physical_time);
+
+      config_container[ZONE_0]->
+          SetPhysicalTime(new_physical_time);
+    }
+
     /*--- Monitor the computations after each iteration. ---*/
 
     Monitor(TimeIter);
@@ -117,7 +138,11 @@ void CSinglezoneDriver::Preprocess(unsigned long TimeIter) {
    general once the drivers are more stable. ---*/
 
   if (config_container[ZONE_0]->GetTime_Marching() != TIME_MARCHING::STEADY)
-    config_container[ZONE_0]->SetPhysicalTime(static_cast<su2double>(TimeIter)*config_container[ZONE_0]->GetDelta_UnstTimeND());
+    config_container[ZONE_0]->SetPhysicalTime(
+        config_container[ZONE_0]->GetAdaptive_Physical_Time()
+            ? config_container[ZONE_0]->GetAdaptive_Physical_Time_AccumND()
+            : static_cast<su2double>(TimeIter) *
+                  config_container[ZONE_0]->GetDelta_UnstTimeND());
   else
     config_container[ZONE_0]->SetPhysicalTime(0.0);
 

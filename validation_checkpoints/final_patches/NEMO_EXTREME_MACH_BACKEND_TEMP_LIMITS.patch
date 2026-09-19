@@ -1,0 +1,125 @@
+diff --git a/SU2_CFD/include/fluid/CMutationTCLib.hpp b/SU2_CFD/include/fluid/CMutationTCLib.hpp
+index bd01bfcd40..885cc7ecc5 100644
+--- a/SU2_CFD/include/fluid/CMutationTCLib.hpp
++++ b/SU2_CFD/include/fluid/CMutationTCLib.hpp
+@@ -31,6 +31,7 @@
+ 
+ #if defined(HAVE_MPP) && !defined(CODI_REVERSE_TYPE) && !defined(CODI_FORWARD_TYPE)
+ #include "mutation++.h"
++#include <limits>
+ 
+ /*!
+  * \derived class CMutationTCLib
+@@ -145,6 +146,19 @@ public:
+    */
+   vector<su2double>& ComputeTemperatures(vector<su2double>& val_rhos, su2double rhoE, su2double rhoEve, su2double rhoEvel, su2double Tve_old) final;
+ 
++  /*
++   * Mutation++ performs its own thermochemical inversion and the SU2
++   * closure checks validate the returned state. Do not impose the
++   * native SU2-TC 80000 K ceiling on this backend.
++   */
++  su2double GetMaximumTemperature() const final {
++    return std::numeric_limits<su2double>::infinity();
++  }
++
++  su2double GetMaximumVETemperature() const final {
++    return std::numeric_limits<su2double>::infinity();
++  }
++
+   /*!
+    * \brief Get species molar mass.
+    */
+diff --git a/SU2_CFD/include/fluid/CNEMOGas.hpp b/SU2_CFD/include/fluid/CNEMOGas.hpp
+index 6418b89f37..339f6f3bbc 100644
+--- a/SU2_CFD/include/fluid/CNEMOGas.hpp
++++ b/SU2_CFD/include/fluid/CNEMOGas.hpp
+@@ -181,6 +181,19 @@ public:
+    */
+   virtual vector<su2double>& ComputeTemperatures(vector<su2double>& val_rhos, su2double rhoEmix, su2double rhoEve, su2double rhoEvel, su2double Tve_old) = 0;
+ 
++  /*!
++   * \brief Thermochemical admissibility limits owned by the selected
++   *        NEMO thermochemical backend.
++   *
++   * The native SU2 thermochemical model retains its historical
++   * 50--80000 K validity interval. Backends with a wider valid range,
++   * such as Mutation++, override the corresponding limits.
++   */
++  virtual su2double GetMinimumTemperature() const { return 50.0; }
++  virtual su2double GetMaximumTemperature() const { return 8.0E4; }
++  virtual su2double GetMinimumVETemperature() const { return 50.0; }
++  virtual su2double GetMaximumVETemperature() const { return 8.0E4; }
++
+   /*!
+    * \brief Compute speed of sound.
+    */
+diff --git a/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp b/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
+index a96bc989d5..37a2bdccc5 100644
+--- a/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
++++ b/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
+@@ -945,8 +945,10 @@ bool CNEMOEulerSolver::CheckNonPhys(const su2double *V) const {
+   const unsigned short A_INDEX    = nodes->GetAIndex();
+ 
+   /*--- Set temperature clipping values ---*/
+-  const su2double Tmin   = 50.0; const su2double Tmax   = 8E4;
+-  const su2double Tvemin = 50.0; const su2double Tvemax = 8E4;
++  const su2double Tmin   = FluidModel->GetMinimumTemperature();
++  const su2double Tmax   = FluidModel->GetMaximumTemperature();
++  const su2double Tvemin = FluidModel->GetMinimumVETemperature();
++  const su2double Tvemax = FluidModel->GetMaximumVETemperature();
+ 
+   /*--- Check whether state makes sense ---*/
+   for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++)
+diff --git a/SU2_CFD/src/variables/CNEMOEulerVariable.cpp b/SU2_CFD/src/variables/CNEMOEulerVariable.cpp
+index 7719a741f7..68c730166a 100644
+--- a/SU2_CFD/src/variables/CNEMOEulerVariable.cpp
++++ b/SU2_CFD/src/variables/CNEMOEulerVariable.cpp
+@@ -384,7 +384,6 @@ bool CNEMOEulerVariable::Cons2PrimVar(su2double *U, su2double *V,
+                                       su2double *val_Cvves) {
+ 
+   unsigned short iDim, iSpecies;
+-  su2double Tmin, Tmax, Tvemin, Tvemax;
+   vector<su2double> rhos;
+ 
+   rhos.resize(nSpecies,0.0);
+@@ -397,8 +396,10 @@ bool CNEMOEulerVariable::Cons2PrimVar(su2double *U, su2double *V,
+   bool nonPhys = false;
+ 
+   /*--- Set temperature clipping values ---*/
+-  Tmin   = 50.0; Tmax   = 8E4;
+-  Tvemin = 50.0; Tvemax = 8E4;
++  const su2double Tmin   = fluidmodel->GetMinimumTemperature();
++  const su2double Tmax   = fluidmodel->GetMaximumTemperature();
++  const su2double Tvemin = fluidmodel->GetMinimumVETemperature();
++  const su2double Tvemax = fluidmodel->GetMaximumVETemperature();
+ 
+   /*--- Rename variables for convenience ---*/
+   su2double rhoE   = U[nSpecies+nDim];     // Density * energy [J/m3]
+@@ -446,14 +447,20 @@ bool CNEMOEulerVariable::Cons2PrimVar(su2double *U, su2double *V,
+   V[TVE_INDEX] = T[1];
+ 
+   // Determine if the temperature lies within the acceptable range
+-  if (V[T_INDEX] <= Tmin)      { nonPhys = true; return nonPhys;}
+-  if (V[T_INDEX] >= Tmax) { nonPhys = true; return nonPhys;}
+-  else if (V[T_INDEX] != V[T_INDEX]){ nonPhys = true; return nonPhys;}
++  if (!std::isfinite(V[T_INDEX]) ||
++      V[T_INDEX] <= Tmin ||
++      V[T_INDEX] >= Tmax) {
++    nonPhys = true;
++    return nonPhys;
++  }
+ 
+   if (!monoatomic){
+-    if (V[TVE_INDEX] <= Tvemin)      { nonPhys = true; return nonPhys;}
+-    if (V[TVE_INDEX] >= Tvemax) { nonPhys = true; return nonPhys;}
+-    else if (V[TVE_INDEX] != V[TVE_INDEX]){ nonPhys = true; return nonPhys;}
++    if (!std::isfinite(V[TVE_INDEX]) ||
++        V[TVE_INDEX] <= Tvemin ||
++        V[TVE_INDEX] >= Tvemax) {
++      nonPhys = true;
++      return nonPhys;
++    }
+   }
+   else {V[TVE_INDEX] = Tve_Freestream;}
+ 

@@ -945,8 +945,10 @@ bool CNEMOEulerSolver::CheckNonPhys(const su2double *V) const {
   const unsigned short A_INDEX    = nodes->GetAIndex();
 
   /*--- Set temperature clipping values ---*/
-  const su2double Tmin   = 50.0; const su2double Tmax   = 8E4;
-  const su2double Tvemin = 50.0; const su2double Tvemax = 8E4;
+  const su2double Tmin   = FluidModel->GetMinimumTemperature();
+  const su2double Tmax   = FluidModel->GetMaximumTemperature();
+  const su2double Tvemin = FluidModel->GetMinimumVETemperature();
+  const su2double Tvemax = FluidModel->GetMaximumVETemperature();
 
   /*--- Check whether state makes sense ---*/
   for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++)

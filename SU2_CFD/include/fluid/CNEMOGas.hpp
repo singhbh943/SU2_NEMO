@@ -182,6 +182,19 @@ public:
   virtual vector<su2double>& ComputeTemperatures(vector<su2double>& val_rhos, su2double rhoEmix, su2double rhoEve, su2double rhoEvel, su2double Tve_old) = 0;
 
   /*!
+   * \brief Thermochemical admissibility limits owned by the selected
+   *        NEMO thermochemical backend.
+   *
+   * The native SU2 thermochemical model retains its historical
+   * 50--80000 K validity interval. Backends with a wider valid range,
+   * such as Mutation++, override the corresponding limits.
+   */
+  virtual su2double GetMinimumTemperature() const { return 50.0; }
+  virtual su2double GetMaximumTemperature() const { return 8.0E4; }
+  virtual su2double GetMinimumVETemperature() const { return 50.0; }
+  virtual su2double GetMaximumVETemperature() const { return 8.0E4; }
+
+  /*!
    * \brief Compute speed of sound.
    */
   su2double ComputeSoundSpeed();

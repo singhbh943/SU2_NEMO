@@ -384,7 +384,6 @@ bool CNEMOEulerVariable::Cons2PrimVar(su2double *U, su2double *V,
                                       su2double *val_Cvves) {
 
   unsigned short iDim, iSpecies;
-  su2double Tmin, Tmax, Tvemin, Tvemax;
   vector<su2double> rhos;
 
   rhos.resize(nSpecies,0.0);
@@ -397,8 +396,10 @@ bool CNEMOEulerVariable::Cons2PrimVar(su2double *U, su2double *V,
   bool nonPhys = false;
 
   /*--- Set temperature clipping values ---*/
-  Tmin   = 50.0; Tmax   = 8E4;
-  Tvemin = 50.0; Tvemax = 8E4;
+  const su2double Tmin   = fluidmodel->GetMinimumTemperature();
+  const su2double Tmax   = fluidmodel->GetMaximumTemperature();
+  const su2double Tvemin = fluidmodel->GetMinimumVETemperature();
+  const su2double Tvemax = fluidmodel->GetMaximumVETemperature();
 
   /*--- Rename variables for convenience ---*/
   su2double rhoE   = U[nSpecies+nDim];     // Density * energy [J/m3]
@@ -446,14 +447,20 @@ bool CNEMOEulerVariable::Cons2PrimVar(su2double *U, su2double *V,
   V[TVE_INDEX] = T[1];
 
   // Determine if the temperature lies within the acceptable range
-  if (V[T_INDEX] <= Tmin)      { nonPhys = true; return nonPhys;}
-  if (V[T_INDEX] >= Tmax) { nonPhys = true; return nonPhys;}
-  else if (V[T_INDEX] != V[T_INDEX]){ nonPhys = true; return nonPhys;}
+  if (!std::isfinite(V[T_INDEX]) ||
+      V[T_INDEX] <= Tmin ||
+      V[T_INDEX] >= Tmax) {
+    nonPhys = true;
+    return nonPhys;
+  }
 
   if (!monoatomic){
-    if (V[TVE_INDEX] <= Tvemin)      { nonPhys = true; return nonPhys;}
-    if (V[TVE_INDEX] >= Tvemax) { nonPhys = true; return nonPhys;}
-    else if (V[TVE_INDEX] != V[TVE_INDEX]){ nonPhys = true; return nonPhys;}
+    if (!std::isfinite(V[TVE_INDEX]) ||
+        V[TVE_INDEX] <= Tvemin ||
+        V[TVE_INDEX] >= Tvemax) {
+      nonPhys = true;
+      return nonPhys;
+    }
   }
   else {V[TVE_INDEX] = Tve_Freestream;}
 

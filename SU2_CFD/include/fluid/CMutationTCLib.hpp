@@ -31,6 +31,7 @@
 
 #if defined(HAVE_MPP) && !defined(CODI_REVERSE_TYPE) && !defined(CODI_FORWARD_TYPE)
 #include "mutation++.h"
+#include <limits>
 
 /*!
  * \derived class CMutationTCLib
@@ -144,6 +145,19 @@ public:
    * \brief Compute translational and vibrational temperatures vector.
    */
   vector<su2double>& ComputeTemperatures(vector<su2double>& val_rhos, su2double rhoE, su2double rhoEve, su2double rhoEvel, su2double Tve_old) final;
+
+  /*
+   * Mutation++ performs its own thermochemical inversion and the SU2
+   * closure checks validate the returned state. Do not impose the
+   * native SU2-TC 80000 K ceiling on this backend.
+   */
+  su2double GetMaximumTemperature() const final {
+    return std::numeric_limits<su2double>::infinity();
+  }
+
+  su2double GetMaximumVETemperature() const final {
+    return std::numeric_limits<su2double>::infinity();
+  }
 
   /*!
    * \brief Get species molar mass.

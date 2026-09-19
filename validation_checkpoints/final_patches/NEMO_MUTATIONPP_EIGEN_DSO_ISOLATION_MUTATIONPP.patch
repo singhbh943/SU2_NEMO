@@ -1,0 +1,33 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 12ba501..ac36395 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -82,6 +82,28 @@ endif()
+ get_property(mutation++_SRCS GLOBAL PROPERTY mutation++_SRCS)
+ add_library(mutation++ SHARED ${mutation++_SRCS})
+ add_library(mutation++::mutation++ ALIAS mutation++)
++
++# SU2_EIGEN_DSO_SYMBOL_ISOLATION
++#
++# Mutation++ and its host executable can instantiate the same header-only
++# Eigen functions under different compiler options.  On ELF systems these
++# weak template symbols may otherwise be preempted by the executable,
++# causing a Mutation++ Eigen object to be processed by the host's
++# instantiation.  Keep Mutation++ inline/template implementations private
++# and bind internal function references to this shared library.
++if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
++    target_compile_options(
++        mutation++
++        PRIVATE
++        -fvisibility-inlines-hidden
++    )
++    target_link_options(
++        mutation++
++        PRIVATE
++        -Wl,-Bsymbolic-functions
++    )
++endif()
++
+ target_include_directories(mutation++
+     PUBLIC
+         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/general>

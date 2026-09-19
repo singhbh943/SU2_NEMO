@@ -1,0 +1,75 @@
+NEMO / MUTATION++ EIGEN DSO SYMBOL ISOLATION
+=============================================
+
+SU2 parent base:
+65e20fc449859f536cbc73a1db98847dbaf1ccb3
+
+Mutation++ base:
+70202b06c813e76c6bc98010cd7974ac853d11cf
+
+Mutation++ fixed commit:
+0c7ee80b563b51d87cbe05fe1109111a38124b5a
+
+Problem
+-------
+Mutation++ Stefan-Maxwell transport instantiated header-only Eigen QR code
+inside libmutation__.so while SU2_CFD also exported the same weak Eigen
+template symbol under a different compilation environment.
+
+Before isolation, AIR11 crashed before iteration 0 inside:
+
+  Eigen::ColPivHouseholderQR<MatrixXd>::computeInPlace()
+
+called from:
+
+  Mutation::Transport::stefanMaxwell(...)
+
+Fix
+---
+Mutation++ shared library target uses:
+
+  -fvisibility-inlines-hidden
+  -Wl,-Bsymbolic-functions
+
+The first reduces preemptible inline/template symbols.
+The second binds internal shared-library function references locally.
+Both are retained because the Eigen QR weak symbol remains dynamically
+visible after compilation.
+
+Validation
+----------
+Mutation++ / NEMO regression:
+
+  All tests passed
+  Assertions: 925
+  Test cases: 11
+
+AIR11 runtime:
+  Mach: 23.9
+  Model: air_11
+  Ionization: YES
+  Partial catalytic efficiency: 0.2
+  Explicit CFL: 0.1
+  Iterations: 3
+
+Exact preserved restart SHA256:
+
+  092b305eaa18c133fbf6cf42312a6bd2d76241f4412c32bd45783c3b8881a60f
+
+Runtime:
+  iteration 0 heat flux = 1.1108e+07
+  iteration 1 heat flux = 1.1099e+07
+  iteration 2 heat flux = 1.1091e+07
+
+Result:
+  RUN_RC=0
+  RUNTIME_FATAL_SCAN=PASS
+  AIR11_NUMERIC_CHECK=PASS
+  AIR11_HEATFLUX_FINITE=PASS
+  AIR11_STEFAN_MAXWELL_RUNTIME=PASS
+  AIR11_CATALYTIC_HEATFLUX_RUNTIME=PASS
+
+No neutral-plasma threshold or transport-physics fallback was added.
+The real Mutation++ ambipolar Stefan-Maxwell closure executed successfully.
+
+No additional rebuild or CFD run was performed during permanent commit.

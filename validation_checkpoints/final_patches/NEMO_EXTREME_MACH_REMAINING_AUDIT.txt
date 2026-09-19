@@ -1,0 +1,132 @@
+============================================================
+ NEMO EXTREME-MACH REMAINING SOURCE AUDIT
+============================================================
+
+===== RESTART / ACCEPTED STATE =====
+SU2_CFD/include/solvers/CFVMFlowSolverBase.inl:874:void CFVMFlowSolverBase<V, R>::LoadRestart_impl(CGeometry **geometry, CSolver ***solver, CConfig *config, int iter,
+SU2_CFD/include/solvers/CFVMFlowSolverBase.inl:931:            nodes->SetSolution(iPoint_Local, iVar, Restart_Data[index+iVar]);
+SU2_CFD/include/solvers/CFVMFlowSolverBase.inl:937:          nodes->SetSolution(iPoint_Local, SolutionRestart);
+SU2_CFD/include/solvers/CFVMFlowSolverBase.inl:1062:void CFVMFlowSolverBase<V, R>::LoadRestart(CGeometry **geometry, CSolver ***solver,
+SU2_CFD/include/solvers/CFVMFlowSolverBase.inl:1065:  LoadRestart_impl(geometry, solver, config, iter, update_geo);
+SU2_CFD/include/solvers/CFVMFlowSolverBase.inl:1151:    solver_container[MESH_0][FLOW_SOL]->LoadRestart(geometry, solver_container, config, TimeIter-1, true);
+SU2_CFD/include/solvers/CFVMFlowSolverBase.inl:1155:      solver_container[MESH_0][TURB_SOL]->LoadRestart(geometry, solver_container, config, TimeIter-1, false);
+SU2_CFD/include/solvers/CFVMFlowSolverBase.inl:1559:        nodes->SetSolution_Old(iPoint, Solution);
+SU2_CFD/include/solvers/CFVMFlowSolverBase.inl:1560:        nodes->SetSolution(iPoint, Solution);
+SU2_CFD/include/variables/CNEMOEulerVariable.hpp:87:  MatrixType Solution_Accepted;
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:122:  Solution_Accepted.resize(nPoint, nVar);
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:123:  Solution_Accepted = Solution;
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:191:            Solution_Accepted(iPoint,iVar)
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:194:               - Solution_Accepted(iPoint,iVar));
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:226:            Solution_Accepted(iPoint,iVar);
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:246:            << Solution_Accepted(iPoint,nSpecies+nDim)
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:248:            << Solution_Accepted(iPoint,nSpecies+nDim+1)
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:265:      Solution_Accepted(iPoint,iVar) = Solution(iPoint,iVar);
+SU2_CFD/src/variables/CNEMONSVariable.cpp:111:   * In SetPrimVar() the recovery line is based on Solution_Accepted,
+SU2_CFD/src/variables/CNEMONSVariable.cpp:119:        Solution_Accepted(iPoint,iSpecies);
+SU2_CFD/src/variables/CNEMONSVariable.cpp:184:            Solution_Accepted(iPoint,iVar)
+SU2_CFD/src/variables/CNEMONSVariable.cpp:187:               - Solution_Accepted(iPoint,iVar));
+SU2_CFD/src/variables/CNEMONSVariable.cpp:234:            Solution_Accepted(iPoint,iVar);
+SU2_CFD/src/variables/CNEMONSVariable.cpp:264:            << Solution_Accepted(iPoint,nSpecies+nDim)
+SU2_CFD/src/variables/CNEMONSVariable.cpp:266:            << Solution_Accepted(iPoint,nSpecies+nDim+1)
+SU2_CFD/src/variables/CNEMONSVariable.cpp:293:      Solution_Accepted(iPoint,iVar) = Solution(iPoint,iVar);
+
+===== TODO / FIXME / UNSUPPORTED NEMO PATHS =====
+SU2_CFD/src/fluid/CMutationTCLib.cpp:70:    SU2_MPI::Error(
+SU2_CFD/src/fluid/CMutationTCLib.cpp:162:    SU2_MPI::Error(
+SU2_CFD/src/fluid/CMutationTCLib.cpp:258:    SU2_MPI::Error("Invalid Mutation++ V-E heat-capacity derivative.", CURRENT_FUNCTION);
+SU2_CFD/src/fluid/CNEMOGas.cpp:161:    SU2_MPI::Error("Array dPdU not allocated!", CURRENT_FUNCTION);
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:253:        SU2_MPI::Error(
+SU2_CFD/src/variables/CNEMONSVariable.cpp:271:        SU2_MPI::Error(
+SU2_CFD/src/numerics/NEMO/convection/ausm_slau.cpp:494:    SU2_MPI::Error("AUSM+-Up2 requires a reference Mach number (\"MACH_NUMBER\") greater than 0.", CURRENT_FUNCTION);
+SU2_CFD/src/numerics/NEMO/convection/ausm_slau.cpp:567:    SU2_MPI::Error("AUSM+M requires a reference Mach number (\"MACH_NUMBER\") greater than 0.", CURRENT_FUNCTION);
+SU2_CFD/src/numerics/NEMO/CNEMONumerics.cpp:68:          SU2_MPI::Error(string("Mutation++ has not been configured/compiled. Add 1) '-Denable-mpp=true' to your meson string or 2) '-DHAVE_MPP' to the CXX FLAGS of your configure string, and recompile."),
+SU2_CFD/src/numerics/NEMO/CNEMONumerics.cpp:266:  /*--- Pre-compute mixture quantities ---*/  //TODO
+SU2_CFD/src/numerics/NEMO/CNEMONumerics.cpp:341:        default: SU2_MPI::Error("nVar and nSpecies mismatch.", CURRENT_FUNCTION);
+SU2_CFD/src/numerics/NEMO/NEMO_sources.cpp:115:  // Note: Electronic energy not implemented
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:57:    SU2_MPI::Error(
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:120:    SU2_MPI::Error(
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:137:    SU2_MPI::Error(
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:266:      SU2_MPI::Error(
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:287:  /// TODO: This type of variables will be replaced.
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:389:    SU2_MPI::Error("Oops! The CNEMOEulerSolver static array sizes are not large enough.",CURRENT_FUNCTION);
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:867:  //NOTE: TODO - this doesnt compute Cvves/ dPdU,etc.yet
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:904:  //TODO: Move these to a general location
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:940:  //TODO: Move these to a general location
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:1283:     SU2_MPI::Error(string("Either 1) Mutation++ has not been configured/compiled (add '-Denable-mpp=true' to your meson string) or 2) CODI must be deactivated since it is not compatible with Mutation++."),
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:1354:      SU2_MPI::Error("Only thermodynamics quantities based initialization: set pressure, temperatures and flag INIT_OPTION= TD_CONDITIONS." , CURRENT_FUNCTION);
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:1874:  SU2_MPI::Error("BC_INLET: Not operational in NEMO.", CURRENT_FUNCTION);
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:2098:        SU2_MPI::Error("Unsupported INLET_TYPE.", CURRENT_FUNCTION);
+SU2_CFD/src/solvers/CNEMONSSolver.cpp:287:    // TODO: Look into this!
+SU2_CFD/src/solvers/CNEMONSSolver.cpp:356:  SU2_MPI::Error("BC_HEATFLUX with catalytic wall: Not operational in NEMO.", CURRENT_FUNCTION);
+SU2_CFD/src/solvers/CNEMONSSolver.cpp:357:  //TODO: SCALE WITH EDDY VISC
+SU2_CFD/src/solvers/CNEMONSSolver.cpp:431:        SU2_MPI::Error("NEED TO IMPLEMENT CATALYTIC BOUNDARIES IN HEATFLUX!!!",CURRENT_FUNCTION);
+SU2_CFD/src/solvers/CNEMONSSolver.cpp:499:       Note that we need to add a contribution for moving walls to the Jacobian. ---*/
+SU2_CFD/src/solvers/CNEMONSSolver.cpp:920:            SU2_MPI::Error("Singular thermodynamic Jacobian at partially catalytic wall.",
+SU2_CFD/src/solvers/CNEMONSSolver.cpp:1005:    SU2_MPI::Error("NEED TO TAKE A CLOSER LOOK AT THE JACOBIAN W/ IONIZATION", CURRENT_FUNCTION);
+SU2_CFD/src/solvers/CNEMONSSolver.cpp:1147:    SU2_MPI::Error("Wall Functions not yet operational in NEMO.", CURRENT_FUNCTION);
+
+===== EXACT 80K ADMISSIBILITY LOCATIONS =====
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:387:  su2double Tmin, Tmax, Tvemin, Tvemax;
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:400:  Tmin   = 50.0; Tmax   = 8E4;
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:401:  Tvemin = 50.0; Tvemax = 8E4;
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:450:  if (V[T_INDEX] >= Tmax) { nonPhys = true; return nonPhys;}
+SU2_CFD/src/variables/CNEMOEulerVariable.cpp:455:    if (V[TVE_INDEX] >= Tvemax) { nonPhys = true; return nonPhys;}
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:435:    SetMax_Eigenvalue(geometry, config);
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:562:void CNEMOEulerSolver::SetMax_Eigenvalue(CGeometry *geometry, CConfig *config) {
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:579:  SetMax_Eigenvalue_impl(soundSpeed, geometry, config);
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:948:  const su2double Tmin   = 50.0; const su2double Tmax   = 8E4;
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:949:  const su2double Tvemin = 50.0; const su2double Tvemax = 8E4;
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:961:      V[T_INDEX] < Tmin || V[T_INDEX] > Tmax)
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:965:      V[TVE_INDEX] < Tvemin || V[TVE_INDEX] > Tvemax)
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:1183:  const su2double allowableRatio = config->GetMaxUpdateFractionFlow();
+SU2_CFD/src/solvers/CNEMOEulerSolver.cpp:1629:      NonDimTable << "Total Time" << config->GetMax_Time() << config->GetTime_Ref() << "s" << config->GetMax_Time()/config->GetTime_Ref();
+SU2_CFD/src/fluid/CSU2TCLib.cpp:418:    CharElTemp(2,5)  = 7.049998480000000E+04;
+SU2_CFD/src/fluid/CSU2TCLib.cpp:454:    CharElTemp(4,1) = 2.277077570280000E+02;
+SU2_CFD/src/fluid/CSU2TCLib.cpp:812:    CharElTemp(3,5)  = 7.049998480000000E+04;
+SU2_CFD/src/fluid/CSU2TCLib.cpp:848:    CharElTemp(5,1) = 2.277077570280000E+02;
+SU2_CFD/src/fluid/CSU2TCLib.cpp:859:    CharElTemp(6,1) = 7.508967768800000E+04;
+SU2_CFD/src/fluid/CSU2TCLib.cpp:2126:  const su2double Tmin   = 50.0; const su2double Tmax   = 8E4;
+SU2_CFD/src/fluid/CSU2TCLib.cpp:2127:  const su2double Tvemin = 50.0; const su2double Tvemax = 8E4;
+SU2_CFD/src/fluid/CSU2TCLib.cpp:2128:  su2double Tve_o  = 50.0; su2double Tve2  = 8E4;
+SU2_CFD/src/fluid/CSU2TCLib.cpp:2132:  if (T < Tmin) T = Tmin;  else if (T > Tmax) T = Tmax;
+SU2_CFD/src/fluid/CSU2TCLib.cpp:2133:  if (Tve_old<Tvemin) Tve_old = Tvemin; else if (Tve_old>Tvemax) Tve_old = Tvemax;
+SU2_CFD/src/fluid/CSU2TCLib.cpp:2167:    if ((fabs(Tve2-Tve) < NRtol) && (Tve > Tvemin) && (Tve < Tvemax)) {
+SU2_CFD/src/fluid/CSU2TCLib.cpp:2177:  Tve_o = Tvemin; Tve2 = Tvemax;
+
+===== ELECTRON / AMBIPOLAR / CHARGE TRANSPORT =====
+SU2_CFD/include/numerics/CNumerics.hpp:1707:   * \brief A virtual member to set the electric field
+SU2_CFD/include/numerics/CNumerics.hpp:1708:   * \param[in] EField_DV - New electric field computed by adjoint methods.
+SU2_CFD/include/numerics/elasticity/CFEAElasticity.hpp:118:   * \brief Set element electric field.
+SU2_CFD/include/numerics/elasticity/CFEANonlinearElasticity.hpp:62:  std::unique_ptr<su2double[]> EField_Ref_Unit;    /*!< \brief Electric Field, unitary, in the reference configuration. */
+SU2_CFD/include/numerics/elasticity/CFEANonlinearElasticity.hpp:63:  std::unique_ptr<su2double[]> EField_Ref_Mod;     /*!< \brief Electric Field, modulus, in the reference configuration. */
+SU2_CFD/include/numerics/elasticity/CFEANonlinearElasticity.hpp:64:  std::unique_ptr<su2double[]> EField_Curr_Unit;   /*!< \brief Auxiliary vector for the unitary Electric Field in the current configuration. */
+SU2_CFD/include/numerics/elasticity/CFEANonlinearElasticity.hpp:71:  su2double EFieldMod_Ref;       /*!< \brief Modulus of the electric field in the reference configuration. */
+SU2_CFD/include/numerics/elasticity/CFEANonlinearElasticity.hpp:88:   * \brief Set element electric field.
+SU2_CFD/include/solvers/CDiscAdjFEASolver.hpp:111:  unsigned short nEField = 0; /*!< \brief Number of electric field areas in the problem. */
+SU2_CFD/include/solvers/CDiscAdjFEASolver.hpp:112:  SensData EField;            /*!< \brief Array that stores the electric field as design variables. */
+SU2_CFD/include/solvers/CDiscAdjFEASolver.hpp:218:   * \return Value of the sensitivity coefficient for the Electric Field in the region iEField (time averaged)
+SU2_CFD/include/solvers/CDiscAdjFEASolver.hpp:253:   * \brief Get the number of variables for the Electric Field from the adjoint solver
+SU2_CFD/include/solvers/CDiscAdjFEASolver.hpp:254:   * \return Number of electric field variables from the adjoint solver
+SU2_CFD/include/solvers/CDiscAdjFEASolver.hpp:265:   * \brief Get the value of the Electric Field from the adjoint solver
+SU2_CFD/include/solvers/CDiscAdjFEASolver.hpp:266:   * \return Pointer to the values of the Electric Field
+SU2_CFD/include/solvers/CSolver.hpp:3225:   * \return Value of the sensitivity coefficient for the Electric Field in the region iEField
+SU2_CFD/include/solvers/CSolver.hpp:3261:   * \return Number of electric field variables from the adjoint solver
+SU2_CFD/include/solvers/CSolver.hpp:3273:   * \return Pointer to the values of the Electric Field
+SU2_CFD/src/fluid/CNEMOGas.cpp:158:  // Note: Electron energy not included properly.
+SU2_CFD/src/numerics/NEMO/NEMO_sources.cpp:298:    /*--- Enthalpy and vib-el energy transport due to y-direction diffusion---*/
+SU2_CFD/src/numerics/elasticity/CFEANonlinearElasticity.cpp:52:    // Initialize value of the electric field in the reference configuration
+SU2_CFD/src/numerics/elasticity/CFEANonlinearElasticity.cpp:60:      SU2_MPI::Error("The electric field dimensions do not agree with the geometry.", CURRENT_FUNCTION);
+SU2_CFD/src/numerics/elasticity/CFEANonlinearElasticity.cpp:69:    /*--- Normalize the electric field vector ---*/
+SU2_CFD/src/numerics/elasticity/CFEANonlinearElasticity.cpp:76:      SU2_MPI::Error("The electric field has not been defined.", CURRENT_FUNCTION);
+SU2_CFD/src/numerics/elasticity/CFEANonlinearElasticity.cpp:79:    /*--- Initialize pointer for the electric field ---*/
+SU2_CFD/src/numerics/elasticity/CFEANonlinearElasticity.cpp:86:    /*--- Auxiliary vector for hosting the electric field modulus in the reference configuration ---*/
+SU2_CFD/src/numerics/elasticity/CFEANonlinearElasticity.cpp:91:    /*--- Auxiliary vector for computing the electric field in the current configuration ---*/
+SU2_CFD/src/numerics/elasticity/CFEANonlinearElasticity.cpp:97:    /*--- Auxiliary vector for storing the electric field constant ---*/
+SU2_CFD/src/numerics/elasticity/CFEANonlinearElasticity.cpp:462:  // Set the modulus of the electric field in the current element
+SU2_CFD/src/output/CAdjElasticityOutput.cpp:128:      AddHistoryOutput("SENS_EFIELD_" + iVarS, "Sens[EField" + iVarS + ']', ScreenOutputFormat::SCIENTIFIC, "SENSITIVITY", "d Objective / d Electric field");
+SU2_CFD/src/solvers/CDiscAdjFEASolver.cpp:187:    /*--- Read the values of the electric field ---*/
+SU2_CFD/src/solvers/CFEASolver.cpp:2801:      varName = "electric field";
+
+============================================================
+ AUDIT COMPLETE
+============================================================

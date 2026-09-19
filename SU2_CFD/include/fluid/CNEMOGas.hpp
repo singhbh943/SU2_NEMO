@@ -167,6 +167,24 @@ public:
   virtual vector<su2double>& GetDiffusionCoeff() = 0;
 
   /*!
+   * \brief Compute one-dimensional Stefan-Maxwell diffusion velocities
+   *        and the corresponding ambipolar electric field.
+   *
+   * val_grad_rhos contains the spatial derivative of each partial density
+   * along one physical coordinate direction.  Backends which do not
+   * provide a multicomponent ambipolar closure return false and retain the
+   * historical NEMO mixture-averaged diffusion model.
+   */
+  virtual bool ComputeStefanMaxwellDiffusionVelocities(
+      const vector<su2double>& val_grad_rhos,
+      su2double val_grad_T,
+      su2double val_grad_Tve,
+      vector<su2double>& val_diffusion_velocity,
+      su2double& val_ambipolar_electric_field) {
+    return false;
+  }
+
+  /*!
    * \brief Get viscosity.
    */
   virtual su2double GetViscosity() { return 0; }

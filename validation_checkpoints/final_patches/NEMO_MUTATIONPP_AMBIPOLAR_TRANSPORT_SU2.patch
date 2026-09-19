@@ -1,0 +1,527 @@
+diff --git a/SU2_CFD/include/fluid/CMutationTCLib.hpp b/SU2_CFD/include/fluid/CMutationTCLib.hpp
+index 885cc7ecc5..2092991ad1 100644
+--- a/SU2_CFD/include/fluid/CMutationTCLib.hpp
++++ b/SU2_CFD/include/fluid/CMutationTCLib.hpp
+@@ -130,6 +130,17 @@ public:
+    */
+   vector<su2double>& GetDiffusionCoeff() final;
+ 
++  /*!
++   * \brief Compute Mutation++ generalized Stefan-Maxwell diffusion
++   *        velocities and ambipolar electric field.
++   */
++  bool ComputeStefanMaxwellDiffusionVelocities(
++      const vector<su2double>& val_grad_rhos,
++      su2double val_grad_T,
++      su2double val_grad_Tve,
++      vector<su2double>& val_diffusion_velocity,
++      su2double& val_ambipolar_electric_field) final;
++
+   /*!
+    * \brief Get viscosity.
+    */
+diff --git a/SU2_CFD/include/fluid/CNEMOGas.hpp b/SU2_CFD/include/fluid/CNEMOGas.hpp
+index 339f6f3bbc..475b294683 100644
+--- a/SU2_CFD/include/fluid/CNEMOGas.hpp
++++ b/SU2_CFD/include/fluid/CNEMOGas.hpp
+@@ -166,6 +166,24 @@ public:
+    */
+   virtual vector<su2double>& GetDiffusionCoeff() = 0;
+ 
++  /*!
++   * \brief Compute one-dimensional Stefan-Maxwell diffusion velocities
++   *        and the corresponding ambipolar electric field.
++   *
++   * val_grad_rhos contains the spatial derivative of each partial density
++   * along one physical coordinate direction.  Backends which do not
++   * provide a multicomponent ambipolar closure return false and retain the
++   * historical NEMO mixture-averaged diffusion model.
++   */
++  virtual bool ComputeStefanMaxwellDiffusionVelocities(
++      const vector<su2double>& val_grad_rhos,
++      su2double val_grad_T,
++      su2double val_grad_Tve,
++      vector<su2double>& val_diffusion_velocity,
++      su2double& val_ambipolar_electric_field) {
++    return false;
++  }
++
+   /*!
+    * \brief Get viscosity.
+    */
+diff --git a/SU2_CFD/src/fluid/CMutationTCLib.cpp b/SU2_CFD/src/fluid/CMutationTCLib.cpp
+index b46e42b6c9..48f9f6372f 100644
+--- a/SU2_CFD/src/fluid/CMutationTCLib.cpp
++++ b/SU2_CFD/src/fluid/CMutationTCLib.cpp
+@@ -601,6 +601,172 @@ vector<su2double>& CMutationTCLib::GetDiffusionCoeff(){
+   return DiffusionCoeff;
+ }
+ 
++bool CMutationTCLib::ComputeStefanMaxwellDiffusionVelocities(
++    const vector<su2double>& val_grad_rhos,
++    su2double val_grad_T,
++    su2double val_grad_Tve,
++    vector<su2double>& val_diffusion_velocity,
++    su2double& val_ambipolar_electric_field) {
++
++  /*
++   * Only an ionized Mutation++ mixture requires the ambipolar closure.
++   * Returning false preserves the historical NEMO diffusion path for
++   * neutral Mutation++ mixtures.
++   */
++  if (!mix->hasElectrons())
++    return false;
++
++  if (val_grad_rhos.size() != nSpecies) {
++    SU2_MPI::Error(
++        "Mutation++ Stefan-Maxwell gradient vector has invalid size.",
++        CURRENT_FUNCTION);
++  }
++
++  if (rhos.size() != nSpecies || MolarMass.size() != nSpecies) {
++    SU2_MPI::Error(
++        "Mutation++ Stefan-Maxwell thermochemical state has invalid size.",
++        CURRENT_FUNCTION);
++  }
++
++  if (!(std::isfinite(T) && T > 0.0 &&
++        std::isfinite(Tve) && Tve > 0.0)) {
++    SU2_MPI::Error(
++        "Mutation++ Stefan-Maxwell transport received invalid temperatures.",
++        CURRENT_FUNCTION);
++  }
++
++  /*
++   * MolarMass is stored by SU2 in kg/kmol, therefore use the universal
++   * gas constant in J/(kmol K).
++   */
++  const su2double Ru_kmol =
++      1000.0 * UNIVERSAL_GAS_CONSTANT;
++
++  su2double rho_mix = 0.0;
++  su2double molar_concentration = 0.0;
++
++  for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
++
++    if (!(std::isfinite(rhos[iSpecies]) &&
++          rhos[iSpecies] >= 0.0 &&
++          std::isfinite(MolarMass[iSpecies]) &&
++          MolarMass[iSpecies] > 0.0 &&
++          std::isfinite(val_grad_rhos[iSpecies]))) {
++      SU2_MPI::Error(
++          "Invalid Mutation++ state supplied to Stefan-Maxwell transport.",
++          CURRENT_FUNCTION);
++    }
++
++    rho_mix += rhos[iSpecies];
++    molar_concentration +=
++        rhos[iSpecies] / MolarMass[iSpecies];
++  }
++
++  if (!(std::isfinite(rho_mix) && rho_mix > 0.0 &&
++        std::isfinite(molar_concentration) &&
++        molar_concentration > 0.0)) {
++    SU2_MPI::Error(
++        "Degenerate mixture state in Mutation++ Stefan-Maxwell transport.",
++        CURRENT_FUNCTION);
++  }
++
++  /*
++   * Mutation++ ChemNonEqTTv places the free electron at species index 0.
++   * This is also the convention used internally by Transport::stefanMaxwell.
++   */
++  vector<su2double> grad_partial_pressure(nSpecies, 0.0);
++
++  su2double grad_pressure = 0.0;
++
++  for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
++
++    const bool electron = (iSpecies == 0u);
++
++    const su2double Ti =
++        electron ? Tve : T;
++
++    const su2double grad_Ti =
++        electron ? val_grad_Tve : val_grad_T;
++
++    const su2double ci =
++        rhos[iSpecies] / MolarMass[iSpecies];
++
++    const su2double grad_ci =
++        val_grad_rhos[iSpecies] / MolarMass[iSpecies];
++
++    grad_partial_pressure[iSpecies] =
++        Ru_kmol * (Ti * grad_ci + ci * grad_Ti);
++
++    grad_pressure +=
++        grad_partial_pressure[iSpecies];
++  }
++
++  /*
++   * n*k_B*T_h = c_total*R_u*T_h.
++   *
++   * Preserve SU2 NEMO's existing no-explicit-Soret transport closure.
++   * The pressure/composition and two-temperature partial-pressure
++   * contributions are included here, while thermal-diffusion ratios are
++   * intentionally not silently activated.
++   */
++  const su2double denominator =
++      molar_concentration * Ru_kmol * T;
++
++  if (!(std::isfinite(denominator) && denominator > 0.0)) {
++    SU2_MPI::Error(
++        "Invalid Stefan-Maxwell driving-force denominator.",
++        CURRENT_FUNCTION);
++  }
++
++  vector<su2double> driving_force(nSpecies, 0.0);
++
++  for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
++
++    const su2double Ys =
++        rhos[iSpecies] / rho_mix;
++
++    driving_force[iSpecies] =
++        (grad_partial_pressure[iSpecies] -
++         Ys * grad_pressure) /
++        denominator;
++  }
++
++  val_diffusion_velocity.assign(nSpecies, 0.0);
++  val_ambipolar_electric_field = 0.0;
++
++  /*
++   * order = 1:
++   * use the production Ramshaw generalized Stefan-Maxwell system without
++   * enabling higher-order collision corrections or their diagnostic output.
++   *
++   * Mutation++ simultaneously solves for the ambipolar electric field and
++   * applies its mass-average velocity correction.
++   */
++  mix->stefanMaxwell(
++      T,
++      Tve,
++      driving_force.data(),
++      val_diffusion_velocity.data(),
++      val_ambipolar_electric_field,
++      1);
++
++  if (!std::isfinite(val_ambipolar_electric_field)) {
++    SU2_MPI::Error(
++        "Mutation++ returned a non-finite ambipolar electric field.",
++        CURRENT_FUNCTION);
++  }
++
++  for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
++    if (!std::isfinite(val_diffusion_velocity[iSpecies])) {
++      SU2_MPI::Error(
++          "Mutation++ returned a non-finite Stefan-Maxwell diffusion velocity.",
++          CURRENT_FUNCTION);
++    }
++  }
++
++  return true;
++}
++
+ su2double CMutationTCLib::GetViscosity(){
+ 
+   Mu = mix->viscosity();
+diff --git a/SU2_CFD/src/numerics/NEMO/CNEMONumerics.cpp b/SU2_CFD/src/numerics/NEMO/CNEMONumerics.cpp
+index b37ae69471..a355820c42 100644
+--- a/SU2_CFD/src/numerics/NEMO/CNEMONumerics.cpp
++++ b/SU2_CFD/src/numerics/NEMO/CNEMONumerics.cpp
+@@ -274,13 +274,85 @@ void CNEMONumerics::GetViscousProjFlux(const su2double *val_primvar,
+   /*--- Compute the viscous stress tensor ---*/
+   ComputeStressTensor(nDim,tau,val_gradprimvar+VEL_INDEX, mu);
+ 
++  vector<su2double> grad_rhos(nSpecies, 0.0);
++  vector<su2double> diffusion_velocity(nSpecies, 0.0);
++
+   /*--- Populate entries in the viscous flux vector ---*/
+   for (auto iDim = 0ul; iDim < nDim; iDim++) {
+ 
+-    /*--- Species diffusion velocity ---*/
+-    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
+-      Flux_Tensor[iSpecies][iDim] = rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][iDim]
+-          - V[RHOS_INDEX+iSpecies]*Vector[iDim];
++    /*
++     * Reconstruct partial-density gradients from the non-standard
++     * viscous primitive gradients:
++     *
++     *   rho_s = rho Y_s
++     *   grad(rho_s) = rho grad(Y_s) + Y_s grad(rho).
++     */
++    for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies) {
++      grad_rhos[iSpecies] =
++          rho * GV[RHOS_INDEX+iSpecies][iDim] +
++          V[RHOS_INDEX+iSpecies] * GV[RHO_INDEX][iDim];
++    }
++
++    su2double ambipolar_electric_field = 0.0;
++
++    const bool stefan_maxwell =
++        fluidmodel->ComputeStefanMaxwellDiffusionVelocities(
++            grad_rhos,
++            GV[T_INDEX][iDim],
++            GV[TVE_INDEX][iDim],
++            diffusion_velocity,
++            ambipolar_electric_field);
++
++    if (stefan_maxwell) {
++
++      /*
++       * Mutation++ returns mass-average diffusion velocities.
++       * Convert to SU2's viscous species-flux sign convention.
++       */
++      su2double sum_species_flux = 0.0;
++      su2double largest_Y = -1.0;
++      unsigned short balance_species = 0;
++
++      for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
++
++        const su2double Ys =
++            V[RHOS_INDEX+iSpecies];
++
++        Flux_Tensor[iSpecies][iDim] =
++            -rho * Ys * diffusion_velocity[iSpecies];
++
++        sum_species_flux +=
++            Flux_Tensor[iSpecies][iDim];
++
++        if (Ys > largest_Y) {
++          largest_Y = Ys;
++          balance_species = iSpecies;
++        }
++      }
++
++      /*
++       * Mutation++ already applies the Ramshaw mass-average correction.
++       * Remove only residual floating-point roundoff so that the discrete
++       * SU2 species flux satisfies sum_s Fv_s == 0 exactly.
++       */
++      Flux_Tensor[balance_species][iDim] -=
++          sum_species_flux;
++
++    } else {
++
++      /*
++       * Historical NEMO mixture-averaged closure for thermochemical
++       * backends without a Stefan-Maxwell capability.
++       */
++      for (auto iSpecies = nEl;
++           iSpecies < nSpecies;
++           ++iSpecies) {
++        Flux_Tensor[iSpecies][iDim] =
++            rho * Ds[iSpecies] *
++                GV[RHOS_INDEX+iSpecies][iDim]
++            - V[RHOS_INDEX+iSpecies] *
++                Vector[iDim];
++      }
+     }
+ 
+     /*--- Shear-stress/momentum related terms ---*/
+@@ -290,10 +362,13 @@ void CNEMONumerics::GetViscousProjFlux(const su2double *val_primvar,
+       Flux_Tensor[nSpecies+nDim][iDim] += tau[iDim][jDim]*val_primvar[VEL_INDEX+jDim];
+     }
+ 
+-    /*--- Diffusion terms ---*/
+-    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
+-      Flux_Tensor[nSpecies+nDim][iDim]   += Flux_Tensor[iSpecies][iDim] * hs[iSpecies];
+-      Flux_Tensor[nSpecies+nDim+1][iDim] += Flux_Tensor[iSpecies][iDim] * val_eve[iSpecies];
++    /*--- Diffusion terms: use the exact species flux stored above. ---*/
++    for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies) {
++      Flux_Tensor[nSpecies+nDim][iDim] +=
++          Flux_Tensor[iSpecies][iDim] * hs[iSpecies];
++
++      Flux_Tensor[nSpecies+nDim+1][iDim] +=
++          Flux_Tensor[iSpecies][iDim] * val_eve[iSpecies];
+     }
+ 
+     /*--- Heat transfer terms ---*/
+diff --git a/SU2_CFD/src/numerics/NEMO/NEMO_sources.cpp b/SU2_CFD/src/numerics/NEMO/NEMO_sources.cpp
+index 8db917f58b..593f9fd835 100644
+--- a/SU2_CFD/src/numerics/NEMO/NEMO_sources.cpp
++++ b/SU2_CFD/src/numerics/NEMO/NEMO_sources.cpp
+@@ -279,41 +279,154 @@ CNumerics::ResidualType<> CSource_NEMO::ComputeAxisymmetric(const CConfig *confi
+   if (viscous) {
+     if (!rans){ turb_ke_i = 0.0; }
+ 
+-    su2double Vector = 0.0;
+-    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++)
+-      Vector += rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][1];
++    vector<su2double> species_flux_y(nSpecies, 0.0);
++    vector<su2double> grad_rhos_y(nSpecies, 0.0);
++    vector<su2double> diffusion_velocity_y(nSpecies, 0.0);
++
++    /*
++     * The NEMO viscous primitive gradients store species mass-fraction
++     * gradients. Reconstruct grad(rho_s) for the Mutation++ closure.
++     */
++    for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
++      const su2double Ys =
++          V_i[RHOS_INDEX+iSpecies] / rho;
++
++      grad_rhos_y[iSpecies] =
++          rho * GV[RHOS_INDEX+iSpecies][1] +
++          Ys * GV[RHO_INDEX][1];
++    }
++
++    su2double ambipolar_electric_field_y = 0.0;
++
++    const bool stefan_maxwell =
++        fluidmodel->ComputeStefanMaxwellDiffusionVelocities(
++            grad_rhos_y,
++            GV[T_INDEX][1],
++            GV[TVE_INDEX][1],
++            diffusion_velocity_y,
++            ambipolar_electric_field_y);
++
++    if (stefan_maxwell) {
++
++      su2double sum_species_flux_y = 0.0;
++      su2double largest_Y = -1.0;
++      unsigned short balance_species = 0;
++
++      for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
++
++        const su2double Ys =
++            V_i[RHOS_INDEX+iSpecies] / rho;
++
++        species_flux_y[iSpecies] =
++            -V_i[RHOS_INDEX+iSpecies] *
++             diffusion_velocity_y[iSpecies];
++
++        sum_species_flux_y +=
++            species_flux_y[iSpecies];
++
++        if (Ys > largest_Y) {
++          largest_Y = Ys;
++          balance_species = iSpecies;
++        }
++      }
++
++      species_flux_y[balance_species] -=
++          sum_species_flux_y;
++
++    } else {
++
++      su2double Vector = 0.0;
++
++      for (auto iSpecies = nEl;
++           iSpecies < nSpecies;
++           ++iSpecies)
++        Vector +=
++            rho * Ds[iSpecies] *
++            GV[RHOS_INDEX+iSpecies][1];
++
++      for (auto iSpecies = nEl;
++           iSpecies < nSpecies;
++           ++iSpecies) {
++        species_flux_y[iSpecies] =
++            rho * Ds[iSpecies] *
++                GV[RHOS_INDEX+iSpecies][1]
++            - V_i[RHOS_INDEX+iSpecies] *
++                Vector;
++      }
++    }
+ 
+     su2double Mass = 0.0;
+     for (auto iSpecies=0ul; iSpecies<nSpecies; iSpecies++)
+       Mass += V_i[iSpecies]/rho*Ms[iSpecies];
+ 
+-    const su2double heat_capacity_cp_i   = V_i[RHOCVTR_INDEX]/rho + Ru/Mass;
+-    const su2double total_viscosity_i    = Laminar_Viscosity_i + Eddy_Viscosity_i;
+-    const su2double total_conductivity_i = ktr + kve + heat_capacity_cp_i*Eddy_Viscosity_i/Prandtl_Turb;
+-    const su2double u                    = V_i[VEL_INDEX];
+-    const su2double v                    = V_i[VEL_INDEX+1];
+-    const su2double qy_t                 = -total_conductivity_i*GV[T_INDEX][1];
+-    const su2double qy_ve                = -kve*GV[TVE_INDEX][1];
+-
+-    /*--- Enthalpy and vib-el energy transport due to y-direction diffusion---*/
+-    su2double sumJhs_y, sumJeve_y;
+-    sumJhs_y = sumJeve_y = 0.0;
+-    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
+-      sumJhs_y  += -(rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][1] - V_i[RHOS_INDEX+iSpecies]*Vector) * hs[iSpecies];
+-      sumJeve_y += -(rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][1] - V_i[RHOS_INDEX+iSpecies]*Vector) * eve_i[iSpecies];
++    const su2double heat_capacity_cp_i =
++        V_i[RHOCVTR_INDEX]/rho + Ru/Mass;
++
++    const su2double total_viscosity_i =
++        Laminar_Viscosity_i + Eddy_Viscosity_i;
++
++    /*
++     * Keep the axisymmetric conductive flux consistent with the face flux:
++     *
++     *   k_tr grad(T) + k_ve grad(Tve)
++     *
++     * The historical expression incorrectly added k_ve to grad(T) as well.
++     */
++    const su2double total_conductivity_tr_i =
++        ktr +
++        heat_capacity_cp_i *
++        Eddy_Viscosity_i /
++        Prandtl_Turb;
++
++    const su2double u = V_i[VEL_INDEX];
++    const su2double v = V_i[VEL_INDEX+1];
++
++    const su2double qy_t =
++        -total_conductivity_tr_i *
++        GV[T_INDEX][1];
++
++    const su2double qy_ve =
++        -kve *
++        GV[TVE_INDEX][1];
++
++    /*
++     * Species diffusive energy transport uses exactly the same viscous
++     * species flux that enters the species equations.
++     */
++    su2double sumFhs_y = 0.0;
++    su2double sumFeve_y = 0.0;
++
++    for (auto iSpecies = 0u;
++         iSpecies < nSpecies;
++         ++iSpecies) {
++      sumFhs_y +=
++          species_flux_y[iSpecies] *
++          hs[iSpecies];
++
++      sumFeve_y +=
++          species_flux_y[iSpecies] *
++          eve_i[iSpecies];
+     }
+ 
+-    for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++)
+-      residual[iSpecies] -= 0.0;
++    /*
++     * Axisymmetric divergence contains Fv_y/r for every conserved
++     * species.  The previous implementation explicitly used zero here.
++     */
++    for (auto iSpecies = 0ul;
++         iSpecies < nSpecies;
++         ++iSpecies)
++      residual[iSpecies] -=
++          Volume * yinv *
++          species_flux_y[iSpecies];
+     residual[nSpecies] -= Volume*(yinv*total_viscosity_i*(GV[nSpecies+2][1]+GV[nSpecies+3][0])
+                                                          -TWO3*AuxVar_Grad_i[0][0]);
+     residual[nSpecies+1] -= Volume*(yinv*total_viscosity_i*2*(GV[nSpecies+3][1]-v*yinv)
+                                                              -TWO3*AuxVar_Grad_i[0][1]);
+-    residual[nSpecies+2] -= Volume*(yinv*(-sumJhs_y + total_viscosity_i*(u*(GV[nSpecies+3][0]+GV[nSpecies+2][1])
++    residual[nSpecies+2] -= Volume*(yinv*(sumFhs_y + total_viscosity_i*(u*(GV[nSpecies+3][0]+GV[nSpecies+2][1])
+                                                                         +v*TWO3*(2*GV[nSpecies+3][1]-GV[nSpecies+2][0]
+                                                                         -v*yinv+rho*turb_ke_i))-qy_t)
+                                                                         -TWO3*(AuxVar_Grad_i[1][1]+AuxVar_Grad_i[2][0]));
+-    residual[nSpecies+3] -= Volume*(yinv*(-sumJeve_y -qy_ve));
++    residual[nSpecies+3] -= Volume*(yinv*(sumFeve_y -qy_ve));
+   }
+ 
+   return ResidualType<>(residual, jacobian, nullptr);
+diff --git a/subprojects/Mutationpp b/subprojects/Mutationpp
+index 5ff579f437..70202b06c8 160000
+--- a/subprojects/Mutationpp
++++ b/subprojects/Mutationpp
+@@ -1 +1 @@
+-Subproject commit 5ff579f43781cae07411e5ab46291c9971536be6
++Subproject commit 70202b06c813e76c6bc98010cd7974ac853d11cf

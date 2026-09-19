@@ -279,41 +279,154 @@ CNumerics::ResidualType<> CSource_NEMO::ComputeAxisymmetric(const CConfig *confi
   if (viscous) {
     if (!rans){ turb_ke_i = 0.0; }
 
-    su2double Vector = 0.0;
-    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++)
-      Vector += rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][1];
+    vector<su2double> species_flux_y(nSpecies, 0.0);
+    vector<su2double> grad_rhos_y(nSpecies, 0.0);
+    vector<su2double> diffusion_velocity_y(nSpecies, 0.0);
+
+    /*
+     * The NEMO viscous primitive gradients store species mass-fraction
+     * gradients. Reconstruct grad(rho_s) for the Mutation++ closure.
+     */
+    for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
+      const su2double Ys =
+          V_i[RHOS_INDEX+iSpecies] / rho;
+
+      grad_rhos_y[iSpecies] =
+          rho * GV[RHOS_INDEX+iSpecies][1] +
+          Ys * GV[RHO_INDEX][1];
+    }
+
+    su2double ambipolar_electric_field_y = 0.0;
+
+    const bool stefan_maxwell =
+        fluidmodel->ComputeStefanMaxwellDiffusionVelocities(
+            grad_rhos_y,
+            GV[T_INDEX][1],
+            GV[TVE_INDEX][1],
+            diffusion_velocity_y,
+            ambipolar_electric_field_y);
+
+    if (stefan_maxwell) {
+
+      su2double sum_species_flux_y = 0.0;
+      su2double largest_Y = -1.0;
+      unsigned short balance_species = 0;
+
+      for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
+
+        const su2double Ys =
+            V_i[RHOS_INDEX+iSpecies] / rho;
+
+        species_flux_y[iSpecies] =
+            -V_i[RHOS_INDEX+iSpecies] *
+             diffusion_velocity_y[iSpecies];
+
+        sum_species_flux_y +=
+            species_flux_y[iSpecies];
+
+        if (Ys > largest_Y) {
+          largest_Y = Ys;
+          balance_species = iSpecies;
+        }
+      }
+
+      species_flux_y[balance_species] -=
+          sum_species_flux_y;
+
+    } else {
+
+      su2double Vector = 0.0;
+
+      for (auto iSpecies = nEl;
+           iSpecies < nSpecies;
+           ++iSpecies)
+        Vector +=
+            rho * Ds[iSpecies] *
+            GV[RHOS_INDEX+iSpecies][1];
+
+      for (auto iSpecies = nEl;
+           iSpecies < nSpecies;
+           ++iSpecies) {
+        species_flux_y[iSpecies] =
+            rho * Ds[iSpecies] *
+                GV[RHOS_INDEX+iSpecies][1]
+            - V_i[RHOS_INDEX+iSpecies] *
+                Vector;
+      }
+    }
 
     su2double Mass = 0.0;
     for (auto iSpecies=0ul; iSpecies<nSpecies; iSpecies++)
       Mass += V_i[iSpecies]/rho*Ms[iSpecies];
 
-    const su2double heat_capacity_cp_i   = V_i[RHOCVTR_INDEX]/rho + Ru/Mass;
-    const su2double total_viscosity_i    = Laminar_Viscosity_i + Eddy_Viscosity_i;
-    const su2double total_conductivity_i = ktr + kve + heat_capacity_cp_i*Eddy_Viscosity_i/Prandtl_Turb;
-    const su2double u                    = V_i[VEL_INDEX];
-    const su2double v                    = V_i[VEL_INDEX+1];
-    const su2double qy_t                 = -total_conductivity_i*GV[T_INDEX][1];
-    const su2double qy_ve                = -kve*GV[TVE_INDEX][1];
+    const su2double heat_capacity_cp_i =
+        V_i[RHOCVTR_INDEX]/rho + Ru/Mass;
 
-    /*--- Enthalpy and vib-el energy transport due to y-direction diffusion---*/
-    su2double sumJhs_y, sumJeve_y;
-    sumJhs_y = sumJeve_y = 0.0;
-    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
-      sumJhs_y  += -(rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][1] - V_i[RHOS_INDEX+iSpecies]*Vector) * hs[iSpecies];
-      sumJeve_y += -(rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][1] - V_i[RHOS_INDEX+iSpecies]*Vector) * eve_i[iSpecies];
+    const su2double total_viscosity_i =
+        Laminar_Viscosity_i + Eddy_Viscosity_i;
+
+    /*
+     * Keep the axisymmetric conductive flux consistent with the face flux:
+     *
+     *   k_tr grad(T) + k_ve grad(Tve)
+     *
+     * The historical expression incorrectly added k_ve to grad(T) as well.
+     */
+    const su2double total_conductivity_tr_i =
+        ktr +
+        heat_capacity_cp_i *
+        Eddy_Viscosity_i /
+        Prandtl_Turb;
+
+    const su2double u = V_i[VEL_INDEX];
+    const su2double v = V_i[VEL_INDEX+1];
+
+    const su2double qy_t =
+        -total_conductivity_tr_i *
+        GV[T_INDEX][1];
+
+    const su2double qy_ve =
+        -kve *
+        GV[TVE_INDEX][1];
+
+    /*
+     * Species diffusive energy transport uses exactly the same viscous
+     * species flux that enters the species equations.
+     */
+    su2double sumFhs_y = 0.0;
+    su2double sumFeve_y = 0.0;
+
+    for (auto iSpecies = 0u;
+         iSpecies < nSpecies;
+         ++iSpecies) {
+      sumFhs_y +=
+          species_flux_y[iSpecies] *
+          hs[iSpecies];
+
+      sumFeve_y +=
+          species_flux_y[iSpecies] *
+          eve_i[iSpecies];
     }
 
-    for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++)
-      residual[iSpecies] -= 0.0;
+    /*
+     * Axisymmetric divergence contains Fv_y/r for every conserved
+     * species.  The previous implementation explicitly used zero here.
+     */
+    for (auto iSpecies = 0ul;
+         iSpecies < nSpecies;
+         ++iSpecies)
+      residual[iSpecies] -=
+          Volume * yinv *
+          species_flux_y[iSpecies];
     residual[nSpecies] -= Volume*(yinv*total_viscosity_i*(GV[nSpecies+2][1]+GV[nSpecies+3][0])
                                                          -TWO3*AuxVar_Grad_i[0][0]);
     residual[nSpecies+1] -= Volume*(yinv*total_viscosity_i*2*(GV[nSpecies+3][1]-v*yinv)
                                                              -TWO3*AuxVar_Grad_i[0][1]);
-    residual[nSpecies+2] -= Volume*(yinv*(-sumJhs_y + total_viscosity_i*(u*(GV[nSpecies+3][0]+GV[nSpecies+2][1])
+    residual[nSpecies+2] -= Volume*(yinv*(sumFhs_y + total_viscosity_i*(u*(GV[nSpecies+3][0]+GV[nSpecies+2][1])
                                                                         +v*TWO3*(2*GV[nSpecies+3][1]-GV[nSpecies+2][0]
                                                                         -v*yinv+rho*turb_ke_i))-qy_t)
                                                                         -TWO3*(AuxVar_Grad_i[1][1]+AuxVar_Grad_i[2][0]));
-    residual[nSpecies+3] -= Volume*(yinv*(-sumJeve_y -qy_ve));
+    residual[nSpecies+3] -= Volume*(yinv*(sumFeve_y -qy_ve));
   }
 
   return ResidualType<>(residual, jacobian, nullptr);

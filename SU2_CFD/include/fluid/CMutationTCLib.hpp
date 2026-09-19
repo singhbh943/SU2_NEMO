@@ -131,6 +131,17 @@ public:
   vector<su2double>& GetDiffusionCoeff() final;
 
   /*!
+   * \brief Compute Mutation++ generalized Stefan-Maxwell diffusion
+   *        velocities and ambipolar electric field.
+   */
+  bool ComputeStefanMaxwellDiffusionVelocities(
+      const vector<su2double>& val_grad_rhos,
+      su2double val_grad_T,
+      su2double val_grad_Tve,
+      vector<su2double>& val_diffusion_velocity,
+      su2double& val_ambipolar_electric_field) final;
+
+  /*!
    * \brief Get viscosity.
    */
   su2double GetViscosity() final;

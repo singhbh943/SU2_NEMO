@@ -274,13 +274,85 @@ void CNEMONumerics::GetViscousProjFlux(const su2double *val_primvar,
   /*--- Compute the viscous stress tensor ---*/
   ComputeStressTensor(nDim,tau,val_gradprimvar+VEL_INDEX, mu);
 
+  vector<su2double> grad_rhos(nSpecies, 0.0);
+  vector<su2double> diffusion_velocity(nSpecies, 0.0);
+
   /*--- Populate entries in the viscous flux vector ---*/
   for (auto iDim = 0ul; iDim < nDim; iDim++) {
 
-    /*--- Species diffusion velocity ---*/
-    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
-      Flux_Tensor[iSpecies][iDim] = rho*Ds[iSpecies]*GV[RHOS_INDEX+iSpecies][iDim]
-          - V[RHOS_INDEX+iSpecies]*Vector[iDim];
+    /*
+     * Reconstruct partial-density gradients from the non-standard
+     * viscous primitive gradients:
+     *
+     *   rho_s = rho Y_s
+     *   grad(rho_s) = rho grad(Y_s) + Y_s grad(rho).
+     */
+    for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies) {
+      grad_rhos[iSpecies] =
+          rho * GV[RHOS_INDEX+iSpecies][iDim] +
+          V[RHOS_INDEX+iSpecies] * GV[RHO_INDEX][iDim];
+    }
+
+    su2double ambipolar_electric_field = 0.0;
+
+    const bool stefan_maxwell =
+        fluidmodel->ComputeStefanMaxwellDiffusionVelocities(
+            grad_rhos,
+            GV[T_INDEX][iDim],
+            GV[TVE_INDEX][iDim],
+            diffusion_velocity,
+            ambipolar_electric_field);
+
+    if (stefan_maxwell) {
+
+      /*
+       * Mutation++ returns mass-average diffusion velocities.
+       * Convert to SU2's viscous species-flux sign convention.
+       */
+      su2double sum_species_flux = 0.0;
+      su2double largest_Y = -1.0;
+      unsigned short balance_species = 0;
+
+      for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
+
+        const su2double Ys =
+            V[RHOS_INDEX+iSpecies];
+
+        Flux_Tensor[iSpecies][iDim] =
+            -rho * Ys * diffusion_velocity[iSpecies];
+
+        sum_species_flux +=
+            Flux_Tensor[iSpecies][iDim];
+
+        if (Ys > largest_Y) {
+          largest_Y = Ys;
+          balance_species = iSpecies;
+        }
+      }
+
+      /*
+       * Mutation++ already applies the Ramshaw mass-average correction.
+       * Remove only residual floating-point roundoff so that the discrete
+       * SU2 species flux satisfies sum_s Fv_s == 0 exactly.
+       */
+      Flux_Tensor[balance_species][iDim] -=
+          sum_species_flux;
+
+    } else {
+
+      /*
+       * Historical NEMO mixture-averaged closure for thermochemical
+       * backends without a Stefan-Maxwell capability.
+       */
+      for (auto iSpecies = nEl;
+           iSpecies < nSpecies;
+           ++iSpecies) {
+        Flux_Tensor[iSpecies][iDim] =
+            rho * Ds[iSpecies] *
+                GV[RHOS_INDEX+iSpecies][iDim]
+            - V[RHOS_INDEX+iSpecies] *
+                Vector[iDim];
+      }
     }
 
     /*--- Shear-stress/momentum related terms ---*/
@@ -290,10 +362,13 @@ void CNEMONumerics::GetViscousProjFlux(const su2double *val_primvar,
       Flux_Tensor[nSpecies+nDim][iDim] += tau[iDim][jDim]*val_primvar[VEL_INDEX+jDim];
     }
 
-    /*--- Diffusion terms ---*/
-    for (auto iSpecies = nEl; iSpecies < nSpecies; iSpecies++) {
-      Flux_Tensor[nSpecies+nDim][iDim]   += Flux_Tensor[iSpecies][iDim] * hs[iSpecies];
-      Flux_Tensor[nSpecies+nDim+1][iDim] += Flux_Tensor[iSpecies][iDim] * val_eve[iSpecies];
+    /*--- Diffusion terms: use the exact species flux stored above. ---*/
+    for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies) {
+      Flux_Tensor[nSpecies+nDim][iDim] +=
+          Flux_Tensor[iSpecies][iDim] * hs[iSpecies];
+
+      Flux_Tensor[nSpecies+nDim+1][iDim] +=
+          Flux_Tensor[iSpecies][iDim] * val_eve[iSpecies];
     }
 
     /*--- Heat transfer terms ---*/

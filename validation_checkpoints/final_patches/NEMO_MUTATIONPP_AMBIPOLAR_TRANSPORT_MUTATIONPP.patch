@@ -1,0 +1,15 @@
+diff --git a/src/transport/Transport.cpp b/src/transport/Transport.cpp
+index a299d20..f878703 100644
+--- a/src/transport/Transport.cpp
++++ b/src/transport/Transport.cpp
+@@ -498,8 +498,8 @@ void Transport::stefanMaxwell(double Th, double Te,
+     const int k  = ns - m_thermo.nHeavy();
+     const double nd = m_thermo.numberDensity();
+ 
+-    static ArrayXd X;
+-    X = Map<const ArrayXd>(m_thermo.X(), ns) + 1.0e-16;
++    ArrayXd X =
++        Map<const ArrayXd>(m_thermo.X(), ns) + 1.0e-16;
+     X /= X.sum();
+ 
+     ArrayXd qi(ns), Mi(ns);

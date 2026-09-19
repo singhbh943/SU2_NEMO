@@ -601,6 +601,172 @@ vector<su2double>& CMutationTCLib::GetDiffusionCoeff(){
   return DiffusionCoeff;
 }
 
+bool CMutationTCLib::ComputeStefanMaxwellDiffusionVelocities(
+    const vector<su2double>& val_grad_rhos,
+    su2double val_grad_T,
+    su2double val_grad_Tve,
+    vector<su2double>& val_diffusion_velocity,
+    su2double& val_ambipolar_electric_field) {
+
+  /*
+   * Only an ionized Mutation++ mixture requires the ambipolar closure.
+   * Returning false preserves the historical NEMO diffusion path for
+   * neutral Mutation++ mixtures.
+   */
+  if (!mix->hasElectrons())
+    return false;
+
+  if (val_grad_rhos.size() != nSpecies) {
+    SU2_MPI::Error(
+        "Mutation++ Stefan-Maxwell gradient vector has invalid size.",
+        CURRENT_FUNCTION);
+  }
+
+  if (rhos.size() != nSpecies || MolarMass.size() != nSpecies) {
+    SU2_MPI::Error(
+        "Mutation++ Stefan-Maxwell thermochemical state has invalid size.",
+        CURRENT_FUNCTION);
+  }
+
+  if (!(std::isfinite(T) && T > 0.0 &&
+        std::isfinite(Tve) && Tve > 0.0)) {
+    SU2_MPI::Error(
+        "Mutation++ Stefan-Maxwell transport received invalid temperatures.",
+        CURRENT_FUNCTION);
+  }
+
+  /*
+   * MolarMass is stored by SU2 in kg/kmol, therefore use the universal
+   * gas constant in J/(kmol K).
+   */
+  const su2double Ru_kmol =
+      1000.0 * UNIVERSAL_GAS_CONSTANT;
+
+  su2double rho_mix = 0.0;
+  su2double molar_concentration = 0.0;
+
+  for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
+
+    if (!(std::isfinite(rhos[iSpecies]) &&
+          rhos[iSpecies] >= 0.0 &&
+          std::isfinite(MolarMass[iSpecies]) &&
+          MolarMass[iSpecies] > 0.0 &&
+          std::isfinite(val_grad_rhos[iSpecies]))) {
+      SU2_MPI::Error(
+          "Invalid Mutation++ state supplied to Stefan-Maxwell transport.",
+          CURRENT_FUNCTION);
+    }
+
+    rho_mix += rhos[iSpecies];
+    molar_concentration +=
+        rhos[iSpecies] / MolarMass[iSpecies];
+  }
+
+  if (!(std::isfinite(rho_mix) && rho_mix > 0.0 &&
+        std::isfinite(molar_concentration) &&
+        molar_concentration > 0.0)) {
+    SU2_MPI::Error(
+        "Degenerate mixture state in Mutation++ Stefan-Maxwell transport.",
+        CURRENT_FUNCTION);
+  }
+
+  /*
+   * Mutation++ ChemNonEqTTv places the free electron at species index 0.
+   * This is also the convention used internally by Transport::stefanMaxwell.
+   */
+  vector<su2double> grad_partial_pressure(nSpecies, 0.0);
+
+  su2double grad_pressure = 0.0;
+
+  for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
+
+    const bool electron = (iSpecies == 0u);
+
+    const su2double Ti =
+        electron ? Tve : T;
+
+    const su2double grad_Ti =
+        electron ? val_grad_Tve : val_grad_T;
+
+    const su2double ci =
+        rhos[iSpecies] / MolarMass[iSpecies];
+
+    const su2double grad_ci =
+        val_grad_rhos[iSpecies] / MolarMass[iSpecies];
+
+    grad_partial_pressure[iSpecies] =
+        Ru_kmol * (Ti * grad_ci + ci * grad_Ti);
+
+    grad_pressure +=
+        grad_partial_pressure[iSpecies];
+  }
+
+  /*
+   * n*k_B*T_h = c_total*R_u*T_h.
+   *
+   * Preserve SU2 NEMO's existing no-explicit-Soret transport closure.
+   * The pressure/composition and two-temperature partial-pressure
+   * contributions are included here, while thermal-diffusion ratios are
+   * intentionally not silently activated.
+   */
+  const su2double denominator =
+      molar_concentration * Ru_kmol * T;
+
+  if (!(std::isfinite(denominator) && denominator > 0.0)) {
+    SU2_MPI::Error(
+        "Invalid Stefan-Maxwell driving-force denominator.",
+        CURRENT_FUNCTION);
+  }
+
+  vector<su2double> driving_force(nSpecies, 0.0);
+
+  for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
+
+    const su2double Ys =
+        rhos[iSpecies] / rho_mix;
+
+    driving_force[iSpecies] =
+        (grad_partial_pressure[iSpecies] -
+         Ys * grad_pressure) /
+        denominator;
+  }
+
+  val_diffusion_velocity.assign(nSpecies, 0.0);
+  val_ambipolar_electric_field = 0.0;
+
+  /*
+   * order = 1:
+   * use the production Ramshaw generalized Stefan-Maxwell system without
+   * enabling higher-order collision corrections or their diagnostic output.
+   *
+   * Mutation++ simultaneously solves for the ambipolar electric field and
+   * applies its mass-average velocity correction.
+   */
+  mix->stefanMaxwell(
+      T,
+      Tve,
+      driving_force.data(),
+      val_diffusion_velocity.data(),
+      val_ambipolar_electric_field,
+      1);
+
+  if (!std::isfinite(val_ambipolar_electric_field)) {
+    SU2_MPI::Error(
+        "Mutation++ returned a non-finite ambipolar electric field.",
+        CURRENT_FUNCTION);
+  }
+
+  for (auto iSpecies = 0u; iSpecies < nSpecies; ++iSpecies) {
+    if (!std::isfinite(val_diffusion_velocity[iSpecies])) {
+      SU2_MPI::Error(
+          "Mutation++ returned a non-finite Stefan-Maxwell diffusion velocity.",
+          CURRENT_FUNCTION);
+    }
+  }
+
+  return true;
+}
+
 su2double CMutationTCLib::GetViscosity(){
 
   Mu = mix->viscosity();

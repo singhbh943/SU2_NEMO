@@ -2723,26 +2723,30 @@ void CFVMFlowSolverBase<V, FlowRegime>::Friction_Forces(const CGeometry* geometr
         HeatFlux[iMarker][iVertex] = -(thermal_conductivity_tr*dTdn + thermal_conductivity_ve*dTvedn);
 
         /*--- Compute enthalpy transport to surface due to mass diffusion ---*/
-        bool catalytic = config->GetCatalytic_Wall(iMarker);
-        if (catalytic){
+        if (config->GetCatalytic_Wall(iMarker)) {
 
+          /*
+           * Use exactly the catalytic species viscous flux imposed by
+           * CNEMONSSolver::BC_IsothermalCatalytic_Wall.  Do not
+           * reconstruct an independent mixture-averaged Fick wall flux
+           * during heat-flux postprocessing.
+           */
           const auto nSpecies = config->GetnSpecies();
-          const auto& Grad_PrimVar = nodes->GetGradient_Primitive(iPoint);
-          const auto& PrimVar = nodes->GetPrimitive(iPoint);
-          const auto& Ds = nodes->GetDiffusionCoeff(iPoint);
           const auto& hs = nodes->GetEnthalpys(iPoint);
-          const su2double rho = PrimVar[prim_idx.Density()];
 
           su2double sumJhs = 0.0;
-          for (auto iSpecies = 0u; iSpecies < nSpecies; iSpecies++) {
-            for (auto iDim = 0u; iDim < nDim; iDim++) {
-              su2double dYdn = 1.0/rho*(Grad_PrimVar[iSpecies][iDim] - PrimVar[iSpecies]*Grad_PrimVar[prim_idx.Density()][iDim]/rho);
-              sumJhs += rho*Ds[iSpecies]*hs[iSpecies]*dYdn*UnitNormal[iDim];
-            }
-          }
-          /*--- Surface energy balance: mass diffusion ---*/
-          HeatFlux[iMarker][iVertex] += sumJhs;
 
+          for (auto iSpecies = 0u;
+               iSpecies < nSpecies;
+               ++iSpecies) {
+
+            sumJhs +=
+                this->GetCatalyticWallSpeciesViscousFluxDensity(
+                    iMarker, iVertex, iSpecies) *
+                hs[iSpecies];
+          }
+
+          HeatFlux[iMarker][iVertex] += sumJhs;
         }
       }
 

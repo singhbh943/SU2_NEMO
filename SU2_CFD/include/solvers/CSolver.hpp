@@ -348,6 +348,21 @@ public:
   inline virtual CFluidModel* GetFluidModel(void) const { return nullptr;}
 
   /*!
+   * \brief Return the area-normalized catalytic species viscous flux
+   *        actually imposed by the wall boundary condition.
+   *
+   * Generic solvers have no catalytic species flux and therefore return
+   * zero. NEMO Navier-Stokes overrides this accessor so postprocessing can
+   * use exactly the same wall species flux as the residual.
+   */
+  inline virtual su2double GetCatalyticWallSpeciesViscousFluxDensity(
+      unsigned short /*val_marker*/,
+      unsigned long /*val_vertex*/,
+      unsigned short /*val_species*/) const {
+    return 0.0;
+  }
+
+  /*!
    * \brief Get number of linear solver iterations.
    * \return Number of linear solver iterations.
    */

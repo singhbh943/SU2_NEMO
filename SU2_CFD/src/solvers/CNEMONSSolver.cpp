@@ -43,6 +43,23 @@ CNEMONSSolver::CNEMONSSolver(CGeometry *geometry, CConfig *config, unsigned shor
   Prandtl_Lam        = config->GetPrandtl_Lam();
   Prandtl_Turb       = config->GetPrandtl_Turb();
 
+  /*
+   * Allocate persistent storage for the exact catalytic species wall flux.
+   * The cache is initialized to zero so pre-BC/postprocessing access is
+   * deterministic.
+   */
+  CatalyticWallSpeciesViscousFluxDensity.resize(config->GetnMarker_All());
+
+  for (auto iMarker = 0u;
+       iMarker < config->GetnMarker_All();
+       ++iMarker) {
+
+    CatalyticWallSpeciesViscousFluxDensity[iMarker].assign(
+        geometry->nVertex[iMarker]*nSpecies,
+        su2double(0.0));
+  }
+
+
   /*--- Initialize the secondary values for direct derivative approximations ---*/
   switch(config->GetDirectDiff()) {
     case D_VISCOSITY:
@@ -970,6 +987,20 @@ void CNEMONSSolver::BC_IsothermalCatalytic_Wall(CGeometry *geometry,
           /*--- Apply the catalytic-wall contribution to the linear system. ---*/
           Jacobian.SubtractBlock(iPoint, iPoint, Jacobian_i);
         }
+      }
+
+      /*
+       * Cache the exact catalytic species viscous flux used below by the
+       * energy residual. Res_Visc[s] is face-integrated, therefore divide
+       * by Area to retain the surface flux density.
+       */
+      const auto catalytic_flux_offset =
+          static_cast<unsigned long>(iVertex)*nSpecies;
+
+      for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies) {
+        CatalyticWallSpeciesViscousFluxDensity[val_marker]
+                                                [catalytic_flux_offset+iSpecies] =
+            Res_Visc[iSpecies]/Area;
       }
 
       for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {

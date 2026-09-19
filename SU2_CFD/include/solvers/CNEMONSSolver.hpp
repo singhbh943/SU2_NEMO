@@ -72,6 +72,18 @@ private:
    */
   void SetTau_Wall_WF(CGeometry *geometry, CSolver** solver_container, const CConfig* config);
 
+
+  /*
+   * Exact area-normalized catalytic species viscous flux imposed by the
+   * wall residual. Layout per marker is
+   *
+   *   vertex*nSpecies + species.
+   *
+   * Heat_Fluxes() consumes this cache instead of reconstructing a
+   * separate mixture-averaged Fick wall flux.
+   */
+  vector<vector<su2double>> CatalyticWallSpeciesViscousFluxDensity;
+
 public:
 
   /*!
@@ -90,6 +102,29 @@ public:
    * \brief Destructor of the class.
    */
   ~CNEMONSSolver() = default;
+
+  /*!
+   * \brief Return the exact area-normalized catalytic species viscous flux
+   *        imposed by BC_IsothermalCatalytic_Wall.
+   */
+  inline su2double GetCatalyticWallSpeciesViscousFluxDensity(
+      unsigned short val_marker,
+      unsigned long val_vertex,
+      unsigned short val_species) const final {
+
+    if (val_marker >= CatalyticWallSpeciesViscousFluxDensity.size() ||
+        val_species >= nSpecies)
+      return 0.0;
+
+    const auto index =
+        static_cast<unsigned long>(val_vertex)*nSpecies + val_species;
+
+    if (index >= CatalyticWallSpeciesViscousFluxDensity[val_marker].size())
+      return 0.0;
+
+    return CatalyticWallSpeciesViscousFluxDensity[val_marker][index];
+  }
+
 
   /*!
    * \brief Compute the gradient of the primitive variables using Green-Gauss method,

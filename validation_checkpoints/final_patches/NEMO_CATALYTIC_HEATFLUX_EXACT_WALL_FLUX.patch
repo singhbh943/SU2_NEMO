@@ -1,0 +1,177 @@
+diff --git a/SU2_CFD/include/solvers/CFVMFlowSolverBase.inl b/SU2_CFD/include/solvers/CFVMFlowSolverBase.inl
+index 6b8e0bb4bc..08ef44d94c 100644
+--- a/SU2_CFD/include/solvers/CFVMFlowSolverBase.inl
++++ b/SU2_CFD/include/solvers/CFVMFlowSolverBase.inl
+@@ -2723,26 +2723,30 @@ void CFVMFlowSolverBase<V, FlowRegime>::Friction_Forces(const CGeometry* geometr
+         HeatFlux[iMarker][iVertex] = -(thermal_conductivity_tr*dTdn + thermal_conductivity_ve*dTvedn);
+ 
+         /*--- Compute enthalpy transport to surface due to mass diffusion ---*/
+-        bool catalytic = config->GetCatalytic_Wall(iMarker);
+-        if (catalytic){
+-
++        if (config->GetCatalytic_Wall(iMarker)) {
++
++          /*
++           * Use exactly the catalytic species viscous flux imposed by
++           * CNEMONSSolver::BC_IsothermalCatalytic_Wall.  Do not
++           * reconstruct an independent mixture-averaged Fick wall flux
++           * during heat-flux postprocessing.
++           */
+           const auto nSpecies = config->GetnSpecies();
+-          const auto& Grad_PrimVar = nodes->GetGradient_Primitive(iPoint);
+-          const auto& PrimVar = nodes->GetPrimitive(iPoint);
+-          const auto& Ds = nodes->GetDiffusionCoeff(iPoint);
+           const auto& hs = nodes->GetEnthalpys(iPoint);
+-          const su2double rho = PrimVar[prim_idx.Density()];
+ 
+           su2double sumJhs = 0.0;
+-          for (auto iSpecies = 0u; iSpecies < nSpecies; iSpecies++) {
+-            for (auto iDim = 0u; iDim < nDim; iDim++) {
+-              su2double dYdn = 1.0/rho*(Grad_PrimVar[iSpecies][iDim] - PrimVar[iSpecies]*Grad_PrimVar[prim_idx.Density()][iDim]/rho);
+-              sumJhs += rho*Ds[iSpecies]*hs[iSpecies]*dYdn*UnitNormal[iDim];
+-            }
++
++          for (auto iSpecies = 0u;
++               iSpecies < nSpecies;
++               ++iSpecies) {
++
++            sumJhs +=
++                this->GetCatalyticWallSpeciesViscousFluxDensity(
++                    iMarker, iVertex, iSpecies) *
++                hs[iSpecies];
+           }
+-          /*--- Surface energy balance: mass diffusion ---*/
+-          HeatFlux[iMarker][iVertex] += sumJhs;
+ 
++          HeatFlux[iMarker][iVertex] += sumJhs;
+         }
+       }
+ 
+diff --git a/SU2_CFD/include/solvers/CNEMONSSolver.hpp b/SU2_CFD/include/solvers/CNEMONSSolver.hpp
+index 0e4fe68a5b..5c0e2ee269 100644
+--- a/SU2_CFD/include/solvers/CNEMONSSolver.hpp
++++ b/SU2_CFD/include/solvers/CNEMONSSolver.hpp
+@@ -72,6 +72,18 @@ private:
+    */
+   void SetTau_Wall_WF(CGeometry *geometry, CSolver** solver_container, const CConfig* config);
+ 
++
++  /*
++   * Exact area-normalized catalytic species viscous flux imposed by the
++   * wall residual. Layout per marker is
++   *
++   *   vertex*nSpecies + species.
++   *
++   * Heat_Fluxes() consumes this cache instead of reconstructing a
++   * separate mixture-averaged Fick wall flux.
++   */
++  vector<vector<su2double>> CatalyticWallSpeciesViscousFluxDensity;
++
+ public:
+ 
+   /*!
+@@ -91,6 +103,29 @@ public:
+    */
+   ~CNEMONSSolver() = default;
+ 
++  /*!
++   * \brief Return the exact area-normalized catalytic species viscous flux
++   *        imposed by BC_IsothermalCatalytic_Wall.
++   */
++  inline su2double GetCatalyticWallSpeciesViscousFluxDensity(
++      unsigned short val_marker,
++      unsigned long val_vertex,
++      unsigned short val_species) const final {
++
++    if (val_marker >= CatalyticWallSpeciesViscousFluxDensity.size() ||
++        val_species >= nSpecies)
++      return 0.0;
++
++    const auto index =
++        static_cast<unsigned long>(val_vertex)*nSpecies + val_species;
++
++    if (index >= CatalyticWallSpeciesViscousFluxDensity[val_marker].size())
++      return 0.0;
++
++    return CatalyticWallSpeciesViscousFluxDensity[val_marker][index];
++  }
++
++
+   /*!
+    * \brief Compute the gradient of the primitive variables using Green-Gauss method,
+    *        and stores the result in the <i>Gradient_Primitive</i> variable.
+diff --git a/SU2_CFD/include/solvers/CSolver.hpp b/SU2_CFD/include/solvers/CSolver.hpp
+index 6161e2f0fc..0f1ffd9ada 100644
+--- a/SU2_CFD/include/solvers/CSolver.hpp
++++ b/SU2_CFD/include/solvers/CSolver.hpp
+@@ -347,6 +347,21 @@ public:
+    */
+   inline virtual CFluidModel* GetFluidModel(void) const { return nullptr;}
+ 
++  /*!
++   * \brief Return the area-normalized catalytic species viscous flux
++   *        actually imposed by the wall boundary condition.
++   *
++   * Generic solvers have no catalytic species flux and therefore return
++   * zero. NEMO Navier-Stokes overrides this accessor so postprocessing can
++   * use exactly the same wall species flux as the residual.
++   */
++  inline virtual su2double GetCatalyticWallSpeciesViscousFluxDensity(
++      unsigned short /*val_marker*/,
++      unsigned long /*val_vertex*/,
++      unsigned short /*val_species*/) const {
++    return 0.0;
++  }
++
+   /*!
+    * \brief Get number of linear solver iterations.
+    * \return Number of linear solver iterations.
+diff --git a/SU2_CFD/src/solvers/CNEMONSSolver.cpp b/SU2_CFD/src/solvers/CNEMONSSolver.cpp
+index 60276617f0..c943fb6532 100644
+--- a/SU2_CFD/src/solvers/CNEMONSSolver.cpp
++++ b/SU2_CFD/src/solvers/CNEMONSSolver.cpp
+@@ -43,6 +43,23 @@ CNEMONSSolver::CNEMONSSolver(CGeometry *geometry, CConfig *config, unsigned shor
+   Prandtl_Lam        = config->GetPrandtl_Lam();
+   Prandtl_Turb       = config->GetPrandtl_Turb();
+ 
++  /*
++   * Allocate persistent storage for the exact catalytic species wall flux.
++   * The cache is initialized to zero so pre-BC/postprocessing access is
++   * deterministic.
++   */
++  CatalyticWallSpeciesViscousFluxDensity.resize(config->GetnMarker_All());
++
++  for (auto iMarker = 0u;
++       iMarker < config->GetnMarker_All();
++       ++iMarker) {
++
++    CatalyticWallSpeciesViscousFluxDensity[iMarker].assign(
++        geometry->nVertex[iMarker]*nSpecies,
++        su2double(0.0));
++  }
++
++
+   /*--- Initialize the secondary values for direct derivative approximations ---*/
+   switch(config->GetDirectDiff()) {
+     case D_VISCOSITY:
+@@ -972,6 +989,20 @@ void CNEMONSSolver::BC_IsothermalCatalytic_Wall(CGeometry *geometry,
+         }
+       }
+ 
++      /*
++       * Cache the exact catalytic species viscous flux used below by the
++       * energy residual. Res_Visc[s] is face-integrated, therefore divide
++       * by Area to retain the surface flux density.
++       */
++      const auto catalytic_flux_offset =
++          static_cast<unsigned long>(iVertex)*nSpecies;
++
++      for (auto iSpecies = 0ul; iSpecies < nSpecies; ++iSpecies) {
++        CatalyticWallSpeciesViscousFluxDensity[val_marker]
++                                                [catalytic_flux_offset+iSpecies] =
++            Res_Visc[iSpecies]/Area;
++      }
++
+       for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {
+         Res_Visc[nSpecies+nDim]   += Res_Visc[iSpecies]*hs[iSpecies];
+         Res_Visc[nSpecies+nDim+1] += Res_Visc[iSpecies]*eves[iSpecies];

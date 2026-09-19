@@ -1,0 +1,151 @@
+diff --git a/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp b/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
+index b86a31b3ba..9980b358f5 100644
+--- a/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
++++ b/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
+@@ -570,9 +570,58 @@ void CNEMOEulerSolver::Upwind_Residual(CGeometry *geometry, CSolver **solver_con
+       }
+       su2double lim_ij = min(lim_i, lim_j);
+ 
++      /*
++       * Positivity-preserving scaling for NEMO species reconstruction.
++       *
++       * A physically admissible cell-centred state may contain species with
++       * exactly zero partial density.  Standard MUSCL reconstruction can then
++       * produce a small negative face value even when the underlying state is
++       * valid.  Instead of immediately rejecting the complete reconstructed
++       * state, scale each face reconstruction toward its cell-centred state
++       * until all reconstructed species partial densities are non-negative.
++       *
++       * The same scaling is applied to every reconstructed primitive variable
++       * on a given side of the face, preserving the reconstruction direction
++       * in primitive-variable space.  CheckNonPhys() below remains the final
++       * safeguard for pressure, temperatures, sound speed, non-finite values,
++       * and any remaining non-physical state.
++       */
++      su2double theta_i = 1.0;
++      su2double theta_j = 1.0;
++
++      const unsigned short RHOS_INDEX = nodes->GetRhosIndex();
++      constexpr su2double positivity_safety = 1.0 - 1.0e-12;
++
++      for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {
++
++        const auto iVar = RHOS_INDEX + iSpecies;
++
++        const su2double delta_i =
++            0.5 * lim_ij * Project_Grad_i[iVar];
++        const su2double delta_j =
++           -0.5 * lim_ij * Project_Grad_j[iVar];
++
++        if ((V_i[iVar] + delta_i < 0.0) && (delta_i < 0.0)) {
++          const su2double theta_species =
++              positivity_safety * V_i[iVar] / (-delta_i);
++          theta_i = min(theta_i, max(0.0, theta_species));
++        }
++
++        if ((V_j[iVar] + delta_j < 0.0) && (delta_j < 0.0)) {
++          const su2double theta_species =
++              positivity_safety * V_j[iVar] / (-delta_j);
++          theta_j = min(theta_j, max(0.0, theta_species));
++        }
++      }
++
+       for (auto iVar = 0ul; iVar < nPrimVarGrad; iVar++) {
+-        Primitive_i[iVar] = V_i[iVar] + 0.5 * lim_ij * Project_Grad_i[iVar];
+-        Primitive_j[iVar] = V_j[iVar] - 0.5 * lim_ij * Project_Grad_j[iVar];
++        Primitive_i[iVar] =
++            V_i[iVar] +
++            theta_i * 0.5 * lim_ij * Project_Grad_i[iVar];
++
++        Primitive_j[iVar] =
++            V_j[iVar] -
++            theta_j * 0.5 * lim_ij * Project_Grad_j[iVar];
+       }
+ 
+       /*--- Check for non-physical solutions after reconstruction. If found, use the
+@@ -737,15 +786,23 @@ bool CNEMOEulerSolver::CheckNonPhys(const su2double *V) const {
+ 
+   /*--- Check whether state makes sense ---*/
+   for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++)
+-    if (V[RHOS_INDEX+iSpecies] < 0.0) nonPhys = true;
++    if (!std::isfinite(V[RHOS_INDEX+iSpecies]) ||
++        V[RHOS_INDEX+iSpecies] < 0.0)
++      nonPhys = true;
+ 
+-  if (V[P_INDEX] < 0.0) nonPhys = true;
++  if (!std::isfinite(V[P_INDEX]) || V[P_INDEX] < 0.0)
++    nonPhys = true;
+ 
+-  if (V[T_INDEX] < Tmin || V[T_INDEX] > Tmax) nonPhys = true;
++  if (!std::isfinite(V[T_INDEX]) ||
++      V[T_INDEX] < Tmin || V[T_INDEX] > Tmax)
++    nonPhys = true;
+ 
+-  if (V[TVE_INDEX] < Tvemin || V[TVE_INDEX] > Tvemax) nonPhys = true;
++  if (!std::isfinite(V[TVE_INDEX]) ||
++      V[TVE_INDEX] < Tvemin || V[TVE_INDEX] > Tvemax)
++    nonPhys = true;
+ 
+-  if (V[A_INDEX] < 0.0 ) nonPhys = true;
++  if (!std::isfinite(V[A_INDEX]) || V[A_INDEX] < 0.0)
++    nonPhys = true;
+ 
+   return nonPhys;
+ 
+@@ -806,6 +863,7 @@ void CNEMOEulerSolver::Source_Residual(CGeometry *geometry, CSolver **solver_con
+         /*--- Compute the non-equilibrium chemistry ---*/
+         auto residual = numerics->ComputeChemistry(config);
+ 
++
+         /*--- Check for errors before applying source to the linear system ---*/
+         err = CNumerics::CheckResidualNaNs(implicit, nVar, residual);
+ 
+@@ -939,6 +997,16 @@ void CNEMOEulerSolver::PrepareImplicitIteration(CGeometry *geometry, CSolver**,
+ void CNEMOEulerSolver::CompleteImplicitIteration(CGeometry *geometry, CSolver**, CConfig *config) {
+   SU2_ZONE_SCOPED
+ 
++  /*
++   * Apply the standard NEMO conservative update limiter before the
++   * generic implicit solution update.  Thermochemical recovery is
++   * performed lazily by SetPrimVar() only for candidates that actually
++   * fail conservative-to-primitive conversion.
++   *
++   * Do not run Mutation++ conservative-to-primitive inversion for every
++   * grid point here: that serial all-point preflight dominates runtime
++   * for AIR-7/AIR-11 and duplicates SetPrimVar() recovery.
++   */
+   CompleteImplicitIteration_impl<true>(geometry, config);
+ }
+ 
+@@ -967,19 +1035,23 @@ void CNEMOEulerSolver::ComputeUnderRelaxationFactor(const CConfig *config) {
+         denom += fabs(nodes->GetSolution(iPoint, iVar));
+ 
+         /*--- If final density/species, compute Under-relaxation ---*/
+-        if (iVar == (config ->GetnSpecies()-1)){
+-          su2double ratio = (num/(denom+EPS));
++        if (iVar == (config->GetnSpecies()-1)) {
++          const su2double ratio = num/(denom+EPS);
+           if (ratio > allowableRatio) {
+             localUnderRelaxation = min(allowableRatio / ratio, localUnderRelaxation);
+           }
+         }
++      }
+ 
+-        /*--- Energy ---*/
+-        if (iVar == (nVar-2)){
+-          su2double ratio = fabs(LinSysSol[index]) / (fabs(nodes->GetSolution(iPoint, iVar)) + EPS);
+-          if (ratio > allowableRatio) {
+-            localUnderRelaxation = min(allowableRatio / ratio, localUnderRelaxation);
+-          }
++      /*--- Total energy rhoE. This must be outside the species block. ---*/
++      if (iVar == (nVar-2)) {
++        const su2double ratio =
++            fabs(LinSysSol[index]) /
++            (fabs(nodes->GetSolution(iPoint, iVar)) + EPS);
++
++        if (ratio > allowableRatio) {
++          localUnderRelaxation =
++              min(allowableRatio / ratio, localUnderRelaxation);
+         }
+       }
+     }

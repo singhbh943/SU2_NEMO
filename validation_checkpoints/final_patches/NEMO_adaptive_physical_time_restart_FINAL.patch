@@ -1,0 +1,1002 @@
+diff --git a/Common/include/CConfig.hpp b/Common/include/CConfig.hpp
+index 71f780bbed..086c31e601 100644
+--- a/Common/include/CConfig.hpp
++++ b/Common/include/CConfig.hpp
+@@ -152,6 +152,22 @@ private:
+   su2double CL_Target;         /*!< \brief Fixed Cl mode Target Cl. */
+   su2double Confinement_Param; /*!< \brief Confinement paramenter for Vorticity Confinement method. */
+   TIME_MARCHING TimeMarching;        /*!< \brief Steady or unsteady (time stepping or dual time stepping) computation. */
++
++  bool Adaptive_Physical_Time;       /*!< \brief Enable variable physical time step for dual-time integration. */
++  su2double Physical_Time_Step_Growth; /*!< \brief Maximum physical time-step growth factor per physical step. */
++  su2double Max_Physical_Time_Step;  /*!< \brief Maximum dimensional physical time step (s). */
++
++  /*
++   * Previous physical step in non-dimensional units.
++   * Runtime state used by variable-step BDF2; this is not a config-file option.
++   */
++  su2double Previous_Delta_UnstTimeND = 0.0;
++
++  /*
++   * Accumulated non-dimensional physical time for adaptive stepping.
++   * Fixed-dt cases continue to use the legacy TimeIter*dt relation.
++   */
++  su2double Adaptive_Physical_Time_AccumND = 0.0;
+   su2double FixAzimuthalLine;        /*!< \brief Fix an azimuthal line due to misalignments of the nearfield. */
+   su2double **DV_Value;              /*!< \brief Previous value of the design variable. */
+   su2double Venkat_LimiterCoeff;     /*!< \brief Limiter coefficient */
+@@ -2968,6 +2984,25 @@ public:
+    */
+   su2double GetUnst_CFL(void) const { return Unst_CFL; }
+ 
++  /*!
++   * \brief Whether variable physical time stepping is enabled.
++   */
++  bool GetAdaptive_Physical_Time(void) const { return Adaptive_Physical_Time; }
++
++  /*!
++   * \brief Maximum allowed multiplicative increase in physical dt.
++   */
++  su2double GetPhysical_Time_Step_Growth(void) const {
++    return Physical_Time_Step_Growth;
++  }
++
++  /*!
++   * \brief Maximum dimensional physical time step in seconds.
++   */
++  su2double GetMax_Physical_Time_Step(void) const {
++    return Max_Physical_Time_Step;
++  }
++
+   /*!
+    * \brief Get information about element reorientation
+    * \return    <code>TRUE</code> means that elements can be reoriented if suspected unhealthy
+@@ -6084,6 +6119,34 @@ public:
+    */
+   void SetDelta_UnstTimeND(su2double val_delta_unsttimend) { Delta_UnstTimeND = val_delta_unsttimend; }
+ 
++  /*!
++   * \brief Previous non-dimensional physical time step used by variable-step BDF2.
++   */
++  su2double GetPrevious_Delta_UnstTimeND(void) const {
++    return Previous_Delta_UnstTimeND;
++  }
++
++  /*!
++   * \brief Store previous non-dimensional physical time step.
++   */
++  void SetPrevious_Delta_UnstTimeND(su2double val_dt) {
++    Previous_Delta_UnstTimeND = val_dt;
++  }
++
++  /*!
++   * \brief Accumulated non-dimensional physical time.
++   */
++  su2double GetAdaptive_Physical_Time_AccumND(void) const {
++    return Adaptive_Physical_Time_AccumND;
++  }
++
++  /*!
++   * \brief Set accumulated non-dimensional physical time.
++   */
++  void SetAdaptive_Physical_Time_AccumND(su2double val_time) {
++    Adaptive_Physical_Time_AccumND = val_time;
++  }
++
+   /*!
+    * \brief If we are performing an unsteady simulation, this is the
+    *    value of max physical time for which we run the simulation
+diff --git a/Common/src/CConfig.cpp b/Common/src/CConfig.cpp
+index 0f7a5c6821..c45bf81b2e 100644
+--- a/Common/src/CConfig.cpp
++++ b/Common/src/CConfig.cpp
+@@ -1848,6 +1848,15 @@ void CConfig::SetConfig_Options() {
+   addUnsignedShortOption("TIME_DOFS_ADER_DG", nTimeDOFsADER_DG, 2);
+   /* DESCRIPTION: Unsteady Courant-Friedrichs-Lewy number of the finest grid */
+   addDoubleOption("UNST_CFL_NUMBER", Unst_CFL, 0.0);
++
++  /* DESCRIPTION: Enable variable physical time step for dual-time integration. */
++  addBoolOption("ADAPTIVE_PHYSICAL_TIME", Adaptive_Physical_Time, false);
++
++  /* DESCRIPTION: Maximum multiplicative growth of physical dt per physical step. */
++  addDoubleOption("PHYSICAL_TIME_STEP_GROWTH", Physical_Time_Step_Growth, 1.25);
++
++  /* DESCRIPTION: Maximum dimensional physical time step for adaptive dual-time integration (s). */
++  addDoubleOption("MAX_PHYSICAL_TIME_STEP", Max_Physical_Time_Step, 1.0e20);
+   /* DESCRIPTION: Integer number of periodic time instances for Harmonic Balance */
+   addUnsignedShortOption("TIME_INSTANCES", nTimeInstances, 1);
+   /* DESCRIPTION: Time period for Harmonic Balance wihtout moving meshes */
+@@ -7353,8 +7362,6 @@ void CConfig::SetOutput(SU2_COMPONENT val_software, unsigned short val_izone) {
+           break;
+         case EULER_IMPLICIT:
+           cout << "Euler implicit method for the flow equations." << endl;
+-          if (Kind_FluidModel == MUTATIONPP)
+-            SU2_MPI::Error("Implicit time scheme is not yet implemented with Mutation++. Use EULER_EXPLICIT.", CURRENT_FUNCTION);
+           switch (Kind_Linear_Solver) {
+             case BCGSTAB:
+             case FGMRES:
+diff --git a/SU2_CFD/include/solvers/CFVMFlowSolverBase.hpp b/SU2_CFD/include/solvers/CFVMFlowSolverBase.hpp
+index da14a8ef95..470670cc8a 100644
+--- a/SU2_CFD/include/solvers/CFVMFlowSolverBase.hpp
++++ b/SU2_CFD/include/solvers/CFVMFlowSolverBase.hpp
+@@ -83,6 +83,12 @@ class CFVMFlowSolverBase : public CSolver {
+   su2double Global_Delta_Time = 0.0, /*!< \brief Time-step for TIME_STEPPING time marching strategy. */
+   Global_Delta_UnstTimeND = 0.0;     /*!< \brief Unsteady time step for the dual time strategy. */
+ 
++  /*
++   * Scratch storage for the convective physical Courant controller.
++   * Stores sum_f |u_f . S_f| for each node-centered dual volume.
++   */
++  std::vector<su2double> Adaptive_Physical_Flux_Sum;
++
+   unsigned long ErrorCounter = 0;    /*!< \brief Counter for number of un-physical states. */
+ 
+   /*!
+@@ -574,31 +580,329 @@ class CFVMFlowSolverBase : public CSolver {
+ 
+     }
+ 
+-    /*--- Recompute the unsteady time step for the dual time strategy if the unsteady CFL is different from 0.
+-     * This is only done once because in dual time the time step cannot be variable. ---*/
+-
+-    if (dual_time && (Iteration == config->GetRestart_Iter()) && (config->GetUnst_CFL() != 0.0) && (iMesh == MESH_0)) {
++    /*
++     * Physical dt for dual-time integration.
++     *
++     * Legacy behavior is preserved when ADAPTIVE_PHYSICAL_TIME=NO:
++     * the CFL-based physical step is computed only once.
++     *
++     * Adaptive mode recomputes the candidate physical step at the first
++     * inner iteration of every physical-time iteration.  The initial step
++     * remains TIME_STEP; subsequent steps are limited by:
++     *
++     *   min(dt_CFL, growth*dt_old, dt_max).
++     */
++    const bool adaptive_physical_time =
++        config->GetAdaptive_Physical_Time();
++
++    if (dual_time && (config->GetUnst_CFL() != 0.0) &&
++        (iMesh == MESH_0) &&
++        (!adaptive_physical_time &&
++         (Iteration == config->GetRestart_Iter()))) {
+ 
+-      /*--- Thread-local variable for reduction. ---*/
+       su2double glbDtND = 1e30;
+ 
+       SU2_OMP_FOR_(schedule(static,omp_chunk_size) SU2_NOWAIT)
+       for (auto iPoint = 0ul; iPoint < nPointDomain; iPoint++) {
+-        glbDtND = min(glbDtND, config->GetUnst_CFL()*Global_Delta_Time / nodes->GetLocalCFL(iPoint));
++        glbDtND = min(
++            glbDtND,
++            config->GetUnst_CFL()*Global_Delta_Time /
++            nodes->GetLocalCFL(iPoint));
+       }
+       END_SU2_OMP_FOR
++
+       atomicMin(glbDtND, Global_Delta_UnstTimeND);
+ 
+       BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
+       {
+-        SU2_MPI::Allreduce(&Global_Delta_UnstTimeND, &glbDtND, 1, MPI_DOUBLE, MPI_MIN, SU2_MPI::GetComm());
+-        Global_Delta_UnstTimeND = glbDtND;
++        SU2_MPI::Allreduce(
++            &Global_Delta_UnstTimeND, &glbDtND,
++            1, MPI_DOUBLE, MPI_MIN, SU2_MPI::GetComm());
+ 
++        Global_Delta_UnstTimeND = glbDtND;
+         config->SetDelta_UnstTimeND(Global_Delta_UnstTimeND);
+       }
+       END_SU2_OMP_SAFE_GLOBAL_ACCESS
+     }
+ 
++    if (dual_time && adaptive_physical_time &&
++        (config->GetUnst_CFL() != 0.0) &&
++        (iMesh == MESH_0) &&
++        (config->GetInnerIter() == 0)) {
++
++      /*
++       * hy2Foam/OpenFOAM-style physical Courant controller.
++       *
++       * This is deliberately different from SU2's pseudo-time CFL:
++       *
++       *   Co_i = dt/(2 V_i) *
++       *          sum_f |u_f . S_f|
++       *
++       * The acoustic speed and viscous spectral radius are NOT included
++       * in this physical Courant number.
++       *
++       * Variable-step BDF2 is handled separately in
++       * SetResidual_DualTime().
++       */
++
++      if (dynamic_grid) {
++        SU2_MPI::Error(
++            "ADAPTIVE_PHYSICAL_TIME currently supports static grids only.",
++            CURRENT_FUNCTION);
++      }
++
++      /*
++       * Adaptive restart state (current dt, previous dt and accumulated
++       * physical time) is restored from the flow restart metadata.
++       */
++      const su2double old_dt =
++          config->GetDelta_UnstTimeND();
++
++      const su2double max_dt =
++          config->GetMax_Physical_Time_Step() /
++          config->GetTime_Ref();
++
++      const su2double targetCo =
++          config->GetUnst_CFL();
++
++      const su2double growthCap =
++          config->GetPhysical_Time_Step_Growth();
++
++      if ((old_dt <= 0.0) ||
++          (max_dt <= 0.0) ||
++          (targetCo <= 0.0) ||
++          (growthCap < 1.0)) {
++
++        SU2_MPI::Error(
++            "Adaptive physical-time stepping requires positive TIME_STEP, "
++            "UNST_CFL_NUMBER, MAX_PHYSICAL_TIME_STEP and "
++            "PHYSICAL_TIME_STEP_GROWTH >= 1.",
++            CURRENT_FUNCTION);
++      }
++
++      /*
++       * Resize/reset shared node scratch storage.
++       */
++      BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
++      {
++        Adaptive_Physical_Flux_Sum.assign(
++            nPointDomain, 0.0);
++      }
++      END_SU2_OMP_SAFE_GLOBAL_ACCESS
++
++      /*
++       * Internal dual faces.
++       *
++       * The SU2 edge normal already contains face area, therefore
++       * GetProjVel(...,Normal) has units of velocity*area in dimensional
++       * form, exactly what is needed for the Courant flux sum.
++       */
++      SU2_OMP_FOR_(schedule(static,omp_chunk_size))
++      for (auto iPoint = 0ul;
++           iPoint < nPointDomain;
++           ++iPoint) {
++
++        su2double fluxSum = 0.0;
++
++        for (unsigned short iNeigh = 0;
++             iNeigh < geometry->nodes->GetnPoint(iPoint);
++             ++iNeigh) {
++
++          const auto jPoint =
++              geometry->nodes->GetPoint(iPoint, iNeigh);
++
++          const auto iEdge =
++              geometry->nodes->GetEdge(iPoint, iNeigh);
++
++          const auto Normal =
++              geometry->edges->GetNormal(iEdge);
++
++          const su2double Mean_ProjVel =
++              0.5 *
++              (nodes->GetProjVel(iPoint, Normal) +
++               nodes->GetProjVel(jPoint, Normal));
++
++          fluxSum += fabs(Mean_ProjVel);
++        }
++
++        Adaptive_Physical_Flux_Sum[iPoint] =
++            fluxSum;
++      }
++      END_SU2_OMP_FOR
++
++      /*
++       * Physical boundary faces.
++       *
++       * Internal and periodic interfaces are excluded.  Wall and symmetry
++       * faces may be included safely: their normal physical velocity should
++       * be zero, while farfield/outlet faces contribute their actual mass-
++       * transport velocity scale.
++       */
++      BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
++      {
++        for (unsigned short iMarker = 0;
++             iMarker < geometry->GetnMarker();
++             ++iMarker) {
++
++          const auto kindBC =
++              config->GetMarker_All_KindBC(iMarker);
++
++          if ((kindBC == INTERNAL_BOUNDARY) ||
++              (kindBC == PERIODIC_BOUNDARY))
++            continue;
++
++          for (unsigned long iVertex = 0;
++               iVertex < geometry->GetnVertex(iMarker);
++               ++iVertex) {
++
++            const auto iPoint =
++                geometry->vertex[iMarker][iVertex]->GetNode();
++
++            if (!geometry->nodes->GetDomain(iPoint))
++              continue;
++
++            if (iPoint >= nPointDomain)
++              continue;
++
++            const auto Normal =
++                geometry->vertex[iMarker][iVertex]->GetNormal();
++
++            Adaptive_Physical_Flux_Sum[iPoint] +=
++                fabs(nodes->GetProjVel(iPoint, Normal));
++          }
++        }
++      }
++      END_SU2_OMP_SAFE_GLOBAL_ACCESS
++
++      /*
++       * Compute the maximum physical Courant number associated with the
++       * current physical dt.
++       */
++      ompMasterAssignBarrier(
++          Global_Delta_UnstTimeND, 0.0);
++
++      su2double localMaxCo = 0.0;
++
++      SU2_OMP_FOR_(schedule(static,omp_chunk_size) SU2_NOWAIT)
++      for (auto iPoint = 0ul;
++           iPoint < nPointDomain;
++           ++iPoint) {
++
++        const su2double Vol =
++            geometry->nodes->GetVolume(iPoint);
++
++        if (Vol <= 0.0)
++          continue;
++
++        const su2double localCo =
++            0.5 * old_dt *
++            Adaptive_Physical_Flux_Sum[iPoint] /
++            Vol;
++
++        localMaxCo =
++            max(localMaxCo, localCo);
++      }
++      END_SU2_OMP_FOR
++
++      atomicMax(
++          localMaxCo,
++          Global_Delta_UnstTimeND);
++
++      BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
++      {
++        su2double globalMaxCo = 0.0;
++
++        SU2_MPI::Allreduce(
++            &Global_Delta_UnstTimeND,
++            &globalMaxCo,
++            1,
++            MPI_DOUBLE,
++            MPI_MAX,
++            SU2_MPI::GetComm());
++
++        /*
++         * OpenFOAM-style controller:
++         *
++         *   maxDeltaTFact = targetCo / currentCo
++         *
++         * reductions are immediate; increases are damped.
++         *
++         * PHYSICAL_TIME_STEP_GROWTH is the absolute growth cap.
++         */
++        const su2double coRatio =
++            targetCo /
++            (globalMaxCo + EPS);
++
++        const su2double growthFactor =
++            min(
++                coRatio,
++                min(
++                    1.0 + 0.1*coRatio,
++                    growthCap));
++
++        su2double new_dt =
++            min(
++                old_dt*growthFactor,
++                max_dt);
++
++        if (new_dt <= 0.0) {
++          SU2_MPI::Error(
++              "Physical Courant controller produced dt <= 0.",
++              CURRENT_FUNCTION);
++        }
++
++        /*
++         * Previous dt is required by variable-step BDF2.
++         */
++        config->SetPrevious_Delta_UnstTimeND(
++            old_dt);
++
++        config->SetDelta_UnstTimeND(
++            new_dt);
++
++        Global_Delta_UnstTimeND =
++            new_dt;
++
++        /*
++         * With frozen velocity during controller evaluation, this is the
++         * Courant number corresponding to the newly selected dt.
++         */
++        const su2double estimatedNewCo =
++            globalMaxCo *
++            new_dt /
++            old_dt;
++
++        if (SU2_MPI::GetRank() == MASTER_NODE) {
++
++          cout
++              << "[NEMO_PHYSICAL_CO]"
++              << " time_iter="
++              << config->GetTimeIter()
++
++              << " Co_old="
++              << globalMaxCo
++
++              << " targetCo="
++              << targetCo
++
++              << " factor="
++              << growthFactor
++
++              << " dt_old="
++              << old_dt*config->GetTime_Ref()
++
++              << " dt_new="
++              << new_dt*config->GetTime_Ref()
++
++              << " Co_new_est="
++              << estimatedNewCo
++
++              << endl;
++        }
++      }
++      END_SU2_OMP_SAFE_GLOBAL_ACCESS
++    }
++
+     /*--- The pseudo local time (explicit integration) cannot be greater than the physical time ---*/
+ 
+     if (dual_time && !implicit) {
+diff --git a/SU2_CFD/include/solvers/CFVMFlowSolverBase.inl b/SU2_CFD/include/solvers/CFVMFlowSolverBase.inl
+index 05ec25a0e5..6b8e0bb4bc 100644
+--- a/SU2_CFD/include/solvers/CFVMFlowSolverBase.inl
++++ b/SU2_CFD/include/solvers/CFVMFlowSolverBase.inl
+@@ -1680,6 +1680,54 @@ void CFVMFlowSolverBase<V, FlowRegime>::SetResidual_DualTime(CGeometry *geometry
+ 
+   TimeStep = config->GetDelta_UnstTimeND();
+ 
++  const bool adaptive_physical_time =
++      config->GetAdaptive_Physical_Time();
++
++  /*
++   * Variable-step BDF2:
++   *
++   * h = dt_{n+1}, k = dt_n, r = h/k
++   *
++   * a0 = (1 + 2r)/(h(1+r))
++   * a1 = -(1+r)/h
++   * a2 = r^2/(h(1+r))
++   *
++   * For r=1 this exactly reduces to
++   * 3/(2h), -4/(2h), 1/(2h).
++   */
++  su2double bdf_a0 = 0.0;
++  su2double bdf_a1 = 0.0;
++  su2double bdf_a2 = 0.0;
++
++  if (second_order && adaptive_physical_time) {
++
++    if (dynamic_grid) {
++      SU2_MPI::Error(
++          "Variable-step BDF2 currently supports static grids only.",
++          CURRENT_FUNCTION);
++    }
++
++    su2double PreviousTimeStep =
++        config->GetPrevious_Delta_UnstTimeND();
++
++    if (PreviousTimeStep <= 0.0)
++      PreviousTimeStep = TimeStep;
++
++    const su2double ratio =
++        TimeStep / PreviousTimeStep;
++
++    bdf_a0 =
++        (1.0 + 2.0*ratio) /
++        (TimeStep*(1.0 + ratio));
++
++    bdf_a1 =
++        -(1.0 + ratio) / TimeStep;
++
++    bdf_a2 =
++        (ratio*ratio) /
++        (TimeStep*(1.0 + ratio));
++  }
++
+   /*--- Compute the dual time-stepping source term for static meshes ---*/
+ 
+   if (!dynamic_grid) {
+@@ -1710,15 +1758,31 @@ void CFVMFlowSolverBase<V, FlowRegime>::SetResidual_DualTime(CGeometry *geometry
+       for (iVar = 0; iVar < nVar; iVar++) {
+         if (first_order)
+           LinSysRes(iPoint,iVar) += (U_time_nP1[iVar] - U_time_n[iVar])*Volume_nP1 / TimeStep;
+-        if (second_order)
+-          LinSysRes(iPoint,iVar) += ( 3.0*U_time_nP1[iVar] - 4.0*U_time_n[iVar]
+-                                     +1.0*U_time_nM1[iVar])*Volume_nP1 / (2.0*TimeStep);
++        if (second_order) {
++          if (adaptive_physical_time)
++            LinSysRes(iPoint,iVar) +=
++                (bdf_a0*U_time_nP1[iVar] +
++                 bdf_a1*U_time_n[iVar] +
++                 bdf_a2*U_time_nM1[iVar])*Volume_nP1;
++          else
++            LinSysRes(iPoint,iVar) +=
++                (3.0*U_time_nP1[iVar] -
++                 4.0*U_time_n[iVar] +
++                 1.0*U_time_nM1[iVar])*Volume_nP1 /
++                (2.0*TimeStep);
++        }
+       }
+ 
+       /*--- Compute the Jacobian contribution due to the dual time source term. ---*/
+       if (implicit) {
+         if (first_order) Jacobian.AddVal2Diag(iPoint, Volume_nP1/TimeStep);
+-        if (second_order) Jacobian.AddVal2Diag(iPoint, (Volume_nP1*3.0)/(2.0*TimeStep));
++        if (second_order) {
++          if (adaptive_physical_time)
++            Jacobian.AddVal2Diag(iPoint, Volume_nP1*bdf_a0);
++          else
++            Jacobian.AddVal2Diag(
++                iPoint, (Volume_nP1*3.0)/(2.0*TimeStep));
++        }
+       }
+     }
+     END_SU2_OMP_FOR
+@@ -1838,7 +1902,13 @@ void CFVMFlowSolverBase<V, FlowRegime>::SetResidual_DualTime(CGeometry *geometry
+       /*--- Compute the Jacobian contribution due to the dual time source term. ---*/
+       if (implicit) {
+         if (first_order) Jacobian.AddVal2Diag(iPoint, Volume_nP1/TimeStep);
+-        if (second_order) Jacobian.AddVal2Diag(iPoint, (Volume_nP1*3.0)/(2.0*TimeStep));
++        if (second_order) {
++          if (adaptive_physical_time)
++            Jacobian.AddVal2Diag(iPoint, Volume_nP1*bdf_a0);
++          else
++            Jacobian.AddVal2Diag(
++                iPoint, (Volume_nP1*3.0)/(2.0*TimeStep));
++        }
+       }
+     }
+     END_SU2_OMP_FOR
+diff --git a/SU2_CFD/src/drivers/CSinglezoneDriver.cpp b/SU2_CFD/src/drivers/CSinglezoneDriver.cpp
+index fa6e5ac300..9be636a7f3 100644
+--- a/SU2_CFD/src/drivers/CSinglezoneDriver.cpp
++++ b/SU2_CFD/src/drivers/CSinglezoneDriver.cpp
+@@ -85,6 +85,27 @@ void CSinglezoneDriver::StartSolver() {
+ 
+     Update();
+ 
++
++    /*
++     * Adaptive physical time is accumulated after each completed step.
++     * Update() has already advanced the physical solution from n to n+1,
++     * so Monitor() and Output() see the new physical time.
++     */
++    if ((config_container[ZONE_0]->GetTime_Marching() !=
++         TIME_MARCHING::STEADY) &&
++        config_container[ZONE_0]->GetAdaptive_Physical_Time()) {
++
++      const su2double new_physical_time =
++          config_container[ZONE_0]->GetAdaptive_Physical_Time_AccumND() +
++          config_container[ZONE_0]->GetDelta_UnstTimeND();
++
++      config_container[ZONE_0]->
++          SetAdaptive_Physical_Time_AccumND(new_physical_time);
++
++      config_container[ZONE_0]->
++          SetPhysicalTime(new_physical_time);
++    }
++
+     /*--- Monitor the computations after each iteration. ---*/
+ 
+     Monitor(TimeIter);
+@@ -117,7 +138,11 @@ void CSinglezoneDriver::Preprocess(unsigned long TimeIter) {
+    general once the drivers are more stable. ---*/
+ 
+   if (config_container[ZONE_0]->GetTime_Marching() != TIME_MARCHING::STEADY)
+-    config_container[ZONE_0]->SetPhysicalTime(static_cast<su2double>(TimeIter)*config_container[ZONE_0]->GetDelta_UnstTimeND());
++    config_container[ZONE_0]->SetPhysicalTime(
++        config_container[ZONE_0]->GetAdaptive_Physical_Time()
++            ? config_container[ZONE_0]->GetAdaptive_Physical_Time_AccumND()
++            : static_cast<su2double>(TimeIter) *
++                  config_container[ZONE_0]->GetDelta_UnstTimeND());
+   else
+     config_container[ZONE_0]->SetPhysicalTime(0.0);
+ 
+diff --git a/SU2_CFD/src/output/CFlowOutput.cpp b/SU2_CFD/src/output/CFlowOutput.cpp
+index b0e16fedcc..098fd2134f 100644
+--- a/SU2_CFD/src/output/CFlowOutput.cpp
++++ b/SU2_CFD/src/output/CFlowOutput.cpp
+@@ -2510,6 +2510,7 @@ void CFlowOutput::SetNearfieldInverseDesign(CSolver *solver, const CGeometry *ge
+ void CFlowOutput::WriteAdditionalFiles(CConfig *config, CGeometry *geometry, CSolver **solver_container){
+ 
+   if (config->GetFixed_CL_Mode() ||
++      config->GetAdaptive_Physical_Time() ||
+       (config->GetKind_Streamwise_Periodic() == ENUM_STREAMWISE_PERIODIC::MASSFLOW)){
+     WriteMetaData(config);
+   }
+@@ -2541,6 +2542,33 @@ void CFlowOutput::WriteMetaData(const CConfig *config){
+     else
+       meta_file <<"ITER= " << curInnerIter + config->GetExtIter_OffSet() + 1 << endl;
+ 
++    /*
++     * Adaptive physical-time restart state.
++     *
++     * Store the non-dimensional values actually used by the solver rather
++     * than recomputing them from RESTART_ITER.  Variable-step BDF2 requires
++     * the preceding physical step and the accumulated physical time.
++     */
++    if (config->GetAdaptive_Physical_Time()) {
++
++      /*
++       * Preserve enough significant decimal digits for an exact binary64
++       * round trip.  Adaptive BDF2 restart depends on reproducing the
++       * physical-step history without decimal truncation.
++       */
++      const auto old_precision = meta_file.precision();
++      meta_file.precision(17);
++
++      meta_file << "ADAPTIVE_PHYSICAL_DT_ND= "
++                << config->GetDelta_UnstTimeND() << endl;
++      meta_file << "ADAPTIVE_PREVIOUS_PHYSICAL_DT_ND= "
++                << config->GetPrevious_Delta_UnstTimeND() << endl;
++      meta_file << "ADAPTIVE_PHYSICAL_TIME_ND= "
++                << config->GetAdaptive_Physical_Time_AccumND() << endl;
++
++      meta_file.precision(old_precision);
++    }
++
+     if (config->GetFixed_CL_Mode()){
+       meta_file <<"AOA= " << config->GetAoA() - config->GetAoA_Offset() << endl;
+       meta_file <<"SIDESLIP_ANGLE= " << config->GetAoS() - config->GetAoS_Offset() << endl;
+diff --git a/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp b/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
+index b86a31b3ba..a96bc989d5 100644
+--- a/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
++++ b/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
+@@ -32,6 +32,131 @@
+ #include "../../include/fluid/CMutationTCLib.hpp"
+ #include "../../include/fluid/CSU2TCLib.hpp"
+ 
++
++#include <cmath>
++#include <fstream>
++#include <sstream>
++
++/* NEMO_ADAPTIVE_RESTART_METADATA
++ *
++ * Restore the physical-time integration state associated with the newest
++ * restart solution.  This is deliberately separate from the legacy SU2
++ * metadata reader because that reader is called before NEMO
++ * non-dimensionalization and, for second-order dual time, initially refers
++ * to the older history level.
++ */
++namespace {
++
++void ReadNEMOAdaptivePhysicalTimeMetadata(
++    CConfig *config,
++    const string& filename) {
++
++  std::ifstream meta_file(filename);
++
++  if (!meta_file.good()) {
++    SU2_MPI::Error(
++        "Adaptive physical-time restart requires metadata file '" +
++        filename + "'.",
++        CURRENT_FUNCTION);
++  }
++
++  su2double current_dt = 0.0;
++  su2double previous_dt = 0.0;
++  su2double physical_time = 0.0;
++
++  bool found_current_dt = false;
++  bool found_previous_dt = false;
++  bool found_physical_time = false;
++
++  const string current_key =
++      "ADAPTIVE_PHYSICAL_DT_ND=";
++  const string previous_key =
++      "ADAPTIVE_PREVIOUS_PHYSICAL_DT_ND=";
++  const string time_key =
++      "ADAPTIVE_PHYSICAL_TIME_ND=";
++
++  string line;
++
++  while (std::getline(meta_file, line)) {
++
++    auto read_value =
++        [&](const string& key,
++            su2double& value,
++            bool& found) {
++
++      const auto pos = line.find(key);
++
++      if (pos == string::npos)
++        return;
++
++      std::stringstream value_stream(
++          line.substr(pos + key.size()));
++
++      value_stream >> value;
++
++      if (!value_stream.fail())
++        found = true;
++    };
++
++    read_value(current_key,
++               current_dt,
++               found_current_dt);
++
++    read_value(previous_key,
++               previous_dt,
++               found_previous_dt);
++
++    read_value(time_key,
++               physical_time,
++               found_physical_time);
++  }
++
++  meta_file.close();
++
++  if (!found_current_dt ||
++      !found_previous_dt ||
++      !found_physical_time) {
++
++    SU2_MPI::Error(
++        "Adaptive physical-time metadata is incomplete in '" +
++        filename + "'.",
++        CURRENT_FUNCTION);
++  }
++
++  const bool second_order =
++      config->GetTime_Marching() ==
++      TIME_MARCHING::DT_STEPPING_2ND;
++
++  if (!std::isfinite(current_dt) ||
++      !std::isfinite(previous_dt) ||
++      !std::isfinite(physical_time) ||
++      current_dt <= 0.0 ||
++      physical_time < 0.0 ||
++      (second_order && previous_dt <= 0.0)) {
++
++    SU2_MPI::Error(
++        "Invalid adaptive physical-time restart state in '" +
++        filename + "'.",
++        CURRENT_FUNCTION);
++  }
++
++  config->SetDelta_UnstTimeND(current_dt);
++  config->SetPrevious_Delta_UnstTimeND(previous_dt);
++  config->SetAdaptive_Physical_Time_AccumND(physical_time);
++  config->SetPhysicalTime(physical_time);
++
++  if (SU2_MPI::GetRank() == MASTER_NODE) {
++    cout << "[NEMO_ADAPTIVE_RESTART]"
++         << " dt=" << current_dt
++         << " previous_dt=" << previous_dt
++         << " physical_time=" << physical_time
++         << endl;
++  }
++}
++
++}  // namespace
++
++
+ CNEMOEulerSolver::CNEMOEulerSolver(CGeometry *geometry, CConfig *config,
+                            unsigned short iMesh, const bool navier_stokes) :
+   CFVMFlowSolverBase<CNEMOEulerVariable, ENUM_REGIME::COMPRESSIBLE>(*geometry, *config) {
+@@ -120,6 +245,45 @@ CNEMOEulerSolver::CNEMOEulerSolver(CGeometry *geometry, CConfig *config,
+     specified reference values. ---*/
+   SetNondimensionalization(config, iMesh);
+ 
++
++  /*
++   * Restore the adaptive physical-time state from the newest restart level.
++   *
++   * For BDF2 SU2 first uses RESTART_ITER-2 as the older history solution
++   * and subsequently loads RESTART_ITER-1 as the newest state.  The time
++   * integration metadata must therefore come from RESTART_ITER-1.
++   *
++   * This restoration is intentionally performed after NEMO
++   * non-dimensionalization because SetNondimensionalization() initializes
++   * Delta_UnstTimeND from the dimensional TIME_STEP.
++   */
++  if (restart &&
++      config->GetAdaptive_Physical_Time() &&
++      (iMesh == MESH_0) &&
++      (nZone <= 1)) {
++
++    if (config->GetRestart_Iter() == 0) {
++      SU2_MPI::Error(
++          "Adaptive physical-time restart requires RESTART_ITER > 0.",
++          CURRENT_FUNCTION);
++    }
++
++    const int adaptive_restart_iter =
++        SU2_TYPE::Int(config->GetRestart_Iter()) - 1;
++
++    string adaptive_meta_filename = "flow";
++
++    adaptive_meta_filename =
++        config->GetFilename(
++            adaptive_meta_filename,
++            ".meta",
++            adaptive_restart_iter);
++
++    ReadNEMOAdaptivePhysicalTimeMetadata(
++        config,
++        adaptive_meta_filename);
++  }
++
+   /// TODO: This type of variables will be replaced.
+ 
+   AllocateTerribleLegacyTemporaryVariables();
+@@ -570,9 +734,58 @@ void CNEMOEulerSolver::Upwind_Residual(CGeometry *geometry, CSolver **solver_con
+       }
+       su2double lim_ij = min(lim_i, lim_j);
+ 
++      /*
++       * Positivity-preserving scaling for NEMO species reconstruction.
++       *
++       * A physically admissible cell-centred state may contain species with
++       * exactly zero partial density.  Standard MUSCL reconstruction can then
++       * produce a small negative face value even when the underlying state is
++       * valid.  Instead of immediately rejecting the complete reconstructed
++       * state, scale each face reconstruction toward its cell-centred state
++       * until all reconstructed species partial densities are non-negative.
++       *
++       * The same scaling is applied to every reconstructed primitive variable
++       * on a given side of the face, preserving the reconstruction direction
++       * in primitive-variable space.  CheckNonPhys() below remains the final
++       * safeguard for pressure, temperatures, sound speed, non-finite values,
++       * and any remaining non-physical state.
++       */
++      su2double theta_i = 1.0;
++      su2double theta_j = 1.0;
++
++      const unsigned short RHOS_INDEX = nodes->GetRhosIndex();
++      constexpr su2double positivity_safety = 1.0 - 1.0e-12;
++
++      for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {
++
++        const auto iVar = RHOS_INDEX + iSpecies;
++
++        const su2double delta_i =
++            0.5 * lim_ij * Project_Grad_i[iVar];
++        const su2double delta_j =
++           -0.5 * lim_ij * Project_Grad_j[iVar];
++
++        if ((V_i[iVar] + delta_i < 0.0) && (delta_i < 0.0)) {
++          const su2double theta_species =
++              positivity_safety * V_i[iVar] / (-delta_i);
++          theta_i = min(theta_i, max(0.0, theta_species));
++        }
++
++        if ((V_j[iVar] + delta_j < 0.0) && (delta_j < 0.0)) {
++          const su2double theta_species =
++              positivity_safety * V_j[iVar] / (-delta_j);
++          theta_j = min(theta_j, max(0.0, theta_species));
++        }
++      }
++
+       for (auto iVar = 0ul; iVar < nPrimVarGrad; iVar++) {
+-        Primitive_i[iVar] = V_i[iVar] + 0.5 * lim_ij * Project_Grad_i[iVar];
+-        Primitive_j[iVar] = V_j[iVar] - 0.5 * lim_ij * Project_Grad_j[iVar];
++        Primitive_i[iVar] =
++            V_i[iVar] +
++            theta_i * 0.5 * lim_ij * Project_Grad_i[iVar];
++
++        Primitive_j[iVar] =
++            V_j[iVar] -
++            theta_j * 0.5 * lim_ij * Project_Grad_j[iVar];
+       }
+ 
+       /*--- Check for non-physical solutions after reconstruction. If found, use the
+@@ -737,15 +950,23 @@ bool CNEMOEulerSolver::CheckNonPhys(const su2double *V) const {
+ 
+   /*--- Check whether state makes sense ---*/
+   for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++)
+-    if (V[RHOS_INDEX+iSpecies] < 0.0) nonPhys = true;
++    if (!std::isfinite(V[RHOS_INDEX+iSpecies]) ||
++        V[RHOS_INDEX+iSpecies] < 0.0)
++      nonPhys = true;
+ 
+-  if (V[P_INDEX] < 0.0) nonPhys = true;
++  if (!std::isfinite(V[P_INDEX]) || V[P_INDEX] < 0.0)
++    nonPhys = true;
+ 
+-  if (V[T_INDEX] < Tmin || V[T_INDEX] > Tmax) nonPhys = true;
++  if (!std::isfinite(V[T_INDEX]) ||
++      V[T_INDEX] < Tmin || V[T_INDEX] > Tmax)
++    nonPhys = true;
+ 
+-  if (V[TVE_INDEX] < Tvemin || V[TVE_INDEX] > Tvemax) nonPhys = true;
++  if (!std::isfinite(V[TVE_INDEX]) ||
++      V[TVE_INDEX] < Tvemin || V[TVE_INDEX] > Tvemax)
++    nonPhys = true;
+ 
+-  if (V[A_INDEX] < 0.0 ) nonPhys = true;
++  if (!std::isfinite(V[A_INDEX]) || V[A_INDEX] < 0.0)
++    nonPhys = true;
+ 
+   return nonPhys;
+ 
+@@ -806,6 +1027,7 @@ void CNEMOEulerSolver::Source_Residual(CGeometry *geometry, CSolver **solver_con
+         /*--- Compute the non-equilibrium chemistry ---*/
+         auto residual = numerics->ComputeChemistry(config);
+ 
++
+         /*--- Check for errors before applying source to the linear system ---*/
+         err = CNumerics::CheckResidualNaNs(implicit, nVar, residual);
+ 
+@@ -939,6 +1161,16 @@ void CNEMOEulerSolver::PrepareImplicitIteration(CGeometry *geometry, CSolver**,
+ void CNEMOEulerSolver::CompleteImplicitIteration(CGeometry *geometry, CSolver**, CConfig *config) {
+   SU2_ZONE_SCOPED
+ 
++  /*
++   * Apply the standard NEMO conservative update limiter before the
++   * generic implicit solution update.  Thermochemical recovery is
++   * performed lazily by SetPrimVar() only for candidates that actually
++   * fail conservative-to-primitive conversion.
++   *
++   * Do not run Mutation++ conservative-to-primitive inversion for every
++   * grid point here: that serial all-point preflight dominates runtime
++   * for AIR-7/AIR-11 and duplicates SetPrimVar() recovery.
++   */
+   CompleteImplicitIteration_impl<true>(geometry, config);
+ }
+ 
+@@ -967,19 +1199,23 @@ void CNEMOEulerSolver::ComputeUnderRelaxationFactor(const CConfig *config) {
+         denom += fabs(nodes->GetSolution(iPoint, iVar));
+ 
+         /*--- If final density/species, compute Under-relaxation ---*/
+-        if (iVar == (config ->GetnSpecies()-1)){
+-          su2double ratio = (num/(denom+EPS));
++        if (iVar == (config->GetnSpecies()-1)) {
++          const su2double ratio = num/(denom+EPS);
+           if (ratio > allowableRatio) {
+             localUnderRelaxation = min(allowableRatio / ratio, localUnderRelaxation);
+           }
+         }
++      }
+ 
+-        /*--- Energy ---*/
+-        if (iVar == (nVar-2)){
+-          su2double ratio = fabs(LinSysSol[index]) / (fabs(nodes->GetSolution(iPoint, iVar)) + EPS);
+-          if (ratio > allowableRatio) {
+-            localUnderRelaxation = min(allowableRatio / ratio, localUnderRelaxation);
+-          }
++      /*--- Total energy rhoE. This must be outside the species block. ---*/
++      if (iVar == (nVar-2)) {
++        const su2double ratio =
++            fabs(LinSysSol[index]) /
++            (fabs(nodes->GetSolution(iPoint, iVar)) + EPS);
++
++        if (ratio > allowableRatio) {
++          localUnderRelaxation =
++              min(allowableRatio / ratio, localUnderRelaxation);
+         }
+       }
+     }

@@ -1,0 +1,66 @@
+--- a/SU2_CFD/src/variables/CNEMONSVariable.cpp
++++ b/SU2_CFD/src/variables/CNEMONSVariable.cpp
+@@ -102,7 +102,37 @@
+   const su2double TveSeed =
+       Primitive(iPoint,TVE_INDEX);
+ 
+-  /*--- First try the ordinary candidate without limiting. ---*/
++  /*
++   * Cons2PrimVar()/Mutation++ temperature inversion modifies the
++   * internal mixture state even when the candidate is subsequently
++   * rejected.  Every independent recovery attempt therefore has to
++   * begin from the same last thermochemically accepted state.
++   *
++   * In SetPrimVar() the recovery line is based on Solution_Accepted,
++   * not on the possibly-invalid current Solution candidate.
++   */
++  std::vector<su2double> acceptedRhos(nSpecies, 0.0);
++  for (unsigned short iSpecies = 0;
++       iSpecies < nSpecies;
++       ++iSpecies)
++    acceptedRhos[iSpecies] =
++        Solution_Accepted(iPoint,iSpecies);
++
++  auto restoreAcceptedFluidState = [&]() {
++    fluidmodel->SetTDStateRhosTTv(
++        acceptedRhos,
++        TSeed,
++        TveSeed);
++  };
++
++  /*
++   * First try the live conservative candidate directly.
++   *
++   * Do NOT restore Mutation++ before this conversion.  In particular,
++   * immediately after restart loading the primitive T/Tve seed may not
++   * yet represent the loaded conservative state.  Cons2PrimVar() must
++   * reconstruct that state first.
++   */
+   const bool candidateNonPhys =
+       Cons2PrimVar(
+           Solution[iPoint],
+@@ -158,9 +188,13 @@
+       }
+ 
+       /*
+-       * Restore the accepted inversion seed before every independent
+-       * thermochemical recovery attempt.
++       * Restore the complete accepted Mutation++ state before every
++       * independent thermochemical recovery attempt.  Restoring only
++       * Primitive[T,Tve] is insufficient because a failed inversion
++       * also changes Mutation++'s internal mixture state.
+        */
++      restoreAcceptedFluidState();
++
+       Primitive(iPoint,T_INDEX)   = TSeed;
+       Primitive(iPoint,TVE_INDEX) = TveSeed;
+ 
+@@ -199,6 +233,8 @@
+         Solution(iPoint,iVar) =
+             Solution_Accepted(iPoint,iVar);
+ 
++      restoreAcceptedFluidState();
++
+       Primitive(iPoint,T_INDEX)   = TSeed;
+       Primitive(iPoint,TVE_INDEX) = TveSeed;
+ 

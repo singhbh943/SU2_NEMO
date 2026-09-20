@@ -1,0 +1,39 @@
+diff --git a/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp b/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
+index 37a2bdccc5..34c9b0945e 100644
+--- a/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
++++ b/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
+@@ -1268,6 +1268,34 @@ void CNEMOEulerSolver::SetNondimensionalization(CConfig *config, unsigned short
+   const bool tkeNeeded = ((turbulent) && (config->GetKind_Turb_Model() == TURB_MODEL::SST));
+   const bool reynolds_init = (config->GetKind_InitOption() == REYNOLDS);
+ 
++  /*
++   * NEMO_MUTATIONPP_DIMENSIONAL_ONLY
++   *
++   * Mutation++ operates on dimensional thermochemical states and returns
++   * dimensional transport/thermodynamic properties.  The current NEMO
++   * Mutation++ wrapper forwards rho_s, T and Tve directly and likewise
++   * stores viscosity, diffusion coefficients, species enthalpies and
++   * thermal conductivities without a complete SU2 reference-value
++   * conversion layer.
++   *
++   * Consequently, allowing a non-dimensional SU2 reference mode here
++   * would mix non-dimensional flow variables with dimensional
++   * Mutation++ properties.  Fail explicitly rather than silently
++   * producing dimensionally inconsistent residuals and wall heat fluxes.
++   *
++   * Remove this guard only together with a complete dimensionalization
++   * layer covering thermodynamics, chemistry and transport.
++   */
++  if ((config->GetKind_FluidModel() == MUTATIONPP) &&
++      (config->GetRef_NonDim() != DIMENSIONAL)) {
++    SU2_MPI::Error(
++        "NEMO with Mutation++ currently requires "
++        "REF_DIMENSIONALIZATION= DIMENSIONAL. "
++        "Non-dimensional reference modes require a complete "
++        "thermochemistry/transport scaling layer.",
++        CURRENT_FUNCTION);
++  }
++
+   /*--- The dimensional viscosity is needed to determine the free-stream conditions.
+         To accomplish this, simply set the non-dimensional coefficients to the
+         dimensional ones. This will be overruled later.---*/

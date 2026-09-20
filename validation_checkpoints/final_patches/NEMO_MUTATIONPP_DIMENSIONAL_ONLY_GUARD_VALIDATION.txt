@@ -1,0 +1,80 @@
+NEMO / MUTATION++ DIMENSIONALIZATION CONTRACT
+==============================================
+
+Parent base:
+e65a9035899253f1c42c3e75ce3ed85b08d83171
+
+Problem
+-------
+The NEMO Mutation++ interface currently passes thermochemical states
+directly to Mutation++ and stores returned transport / thermodynamic
+properties without a complete SU2 reference-value conversion layer.
+
+Allowing a non-dimensional SU2 reference mode would therefore mix
+non-dimensional flow variables with dimensional Mutation++ properties.
+
+This is broader than wall heat-flux reporting alone.  A local
+multiplication by Heat_Flux_Ref would not repair thermodynamics,
+chemistry, viscosity, diffusion, species enthalpy, thermal
+conductivity, or Stefan-Maxwell transport consistently.
+
+Production contract
+-------------------
+NEMO + Mutation++ currently requires:
+
+  REF_DIMENSIONALIZATION= DIMENSIONAL
+
+Non-dimensional reference modes fail explicitly in:
+
+  CNEMOEulerSolver::SetNondimensionalization()
+
+No change was made to the NEMO wall heat-flux expression.
+
+Validation
+----------
+Source:
+  DIMENSIONALIZATION_GUARD_PATCH=PASS
+  NEMO_HEATFLUX_FORMULA=UNCHANGED
+  REFHEATFLUX_MULTIPLICATION_ADDED=NO
+
+Build:
+  SU2_CFD/src/SU2_CFD
+  BUILD_STATUS=PASS
+
+Dimensional positive control:
+  air_11
+  Mach = 23.9
+  Mutation++
+  ITER = 1
+  CFL = 0.01
+  RESTART_SOL = NO
+  REF_DIMENSIONALIZATION = DIMENSIONAL
+
+Result:
+  DIMENSIONAL_RC=0
+  DIMENSIONAL_CONTROL=PASS
+
+Non-dimensional negative control:
+  REF_DIMENSIONALIZATION = FREESTREAM_PRESS_EQ_ONE
+
+Expected result:
+  explicit rejection before solver iteration
+
+Observed:
+  Error in CNEMOEulerSolver::SetNondimensionalization
+  "NEMO with Mutation++ currently requires
+   REF_DIMENSIONALIZATION= DIMENSIONAL."
+
+  NONDIMENSIONAL_RC=1
+  NONDIMENSIONAL_FAILFAST=PASS
+
+Final:
+  NEMO_MPP_DIMENSIONAL_CONTRACT=PASS
+  DIMENSIONAL_PRODUCTION_PATH=PASS
+  NONDIMENSIONAL_SILENT_MISSCALING=BLOCKED
+  NEMO_HEATFLUX_FORMULA=UNCHANGED
+  LONG_AIR11_RERUN=NOT_RUN
+  CHILD_TASK_RC=0
+
+No full Mutation++ nondimensional conversion layer was implemented.
+No long AIR11 run was repeated.

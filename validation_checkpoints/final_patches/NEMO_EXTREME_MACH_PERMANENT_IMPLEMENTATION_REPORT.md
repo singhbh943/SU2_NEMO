@@ -429,3 +429,625 @@ required AIR7 regression data:
 
 This removes the final known workstation-only dependency from the
 tracked Mutation++/NEMO regression configuration.
+---
+
+## 20. Complete Mutation++ NEMO Production Support Matrix
+
+The production hardening applies to the existing SU2 NEMO solver using
+Mutation++ as the thermochemical backend.  It does not introduce a
+separate solver.
+
+The implementation supports the three Mutation++ air models used during
+this work:
+
+- AIR-5 (`air_5`);
+- AIR-7 (`air_7`);
+- AIR-11 (`air_11`).
+
+The same NEMO solver infrastructure is retained for catalytic and
+non-catalytic walls and for explicit and implicit time integration.
+
+Validation depth is intentionally distinguished from implementation
+support.  Not every possible cross-product of gas model, wall model and
+time integrator was subjected to an identical long CFD calculation.
+The table below therefore records both the implemented capability and
+the strongest validation evidence available from this hardening cycle.
+
+| Gas model | Ionized | Non-catalytic | Finite-rate catalytic | Explicit flow | Implicit flow | Strongest dedicated validation |
+|---|---:|---|---|---|---|---|
+| AIR-5 | No | Supported | Supported | Supported | Supported | chemistry/Eve finite differences, accepted-state recovery, enthalpy checks, partial catalytic-wall Jacobian, implicit transient execution |
+| AIR-7 | Yes | Supported and runtime exercised | Supported and runtime exercised | Runtime exercised | Runtime exercised | chemistry/Eve finite differences, T/Tve derivatives, explicit/implicit CFD runs, transient implicit execution |
+| AIR-11 | Yes | Supported and runtime exercised | Supported and runtime exercised | Runtime exercised | Runtime exercised | chemistry/Eve/T/Tve/P Jacobians, admissibility, gamma, non-catalytic explicit/implicit CFD, final catalytic implicit runtime |
+
+### 20.1 Meaning of "supported"
+
+"Supported" means the functionality is implemented in the permanent
+NEMO/Mutation++ source path and is not dependent on temporary patch
+files or workstation-local source modifications.
+
+Where runtime validation is explicitly stated, an actual SU2_CFD
+execution was completed successfully.
+
+Where finite-difference validation is stated, the analytic or assembled
+Jacobian was compared directly with conservative-state finite
+differences.
+
+---
+
+## 21. AIR-5 Mutation++ Support
+
+AIR-5 is the neutral five-species Mutation++ model used in this work.
+
+Species ordering used by the regression implementation is:
+
+`N, O, NO, N2, O2`
+
+AIR-5 is non-ionized and therefore does not require electron ambipolar
+transport.
+
+Implemented AIR-5 functionality includes:
+
+- Mutation++ thermodynamics;
+- two-temperature NEMO state handling;
+- finite-rate chemistry;
+- complete Mutation++ V-E energy-transfer source;
+- implicit species chemistry Jacobian;
+- implicit V-E source Jacobian;
+- accepted-state thermochemical recovery;
+- Euler accepted-state recovery path;
+- species enthalpy handling;
+- non-catalytic wall operation;
+- finite-rate catalytic wall operation;
+- explicit NEMO integration support;
+- implicit NEMO integration support;
+- physical-time/dual-time integration through the common NEMO path.
+
+The AIR-5 chemistry regression checks both:
+
+- `d(omega_s)/dU`;
+- the complete V-E source derivative.
+
+The production implementation deliberately keeps species chemistry and
+the Mutation++ `energyTransferSource()` contribution separate so the
+V-E source is not double-counted.
+
+### 21.1 AIR-5 catalytic-wall validation
+
+AIR-5 has a dedicated partial catalytic-wall finite-difference Jacobian
+regression.
+
+The regression constructs a physically finite AIR-5 state and checks
+the wall residual/Jacobian at finite catalytic efficiency.
+
+A representative validation state used:
+
+- `T = 9000 K`;
+- `Tve = 7000 K`;
+- wall temperature `Tw = 300 K`;
+- catalytic efficiency `gamma = 0.2`.
+
+This verifies that the catalytic-wall linearization is consistent with
+the wall residual rather than merely confirming that the case parses.
+
+### 21.2 AIR-5 transport
+
+Because AIR-5 has no free electron, the ionized ambipolar
+Stefan-Maxwell branch is not required.
+
+AIR-5 therefore remains compatible with the standard Mutation++/NEMO
+heavy-species transport path while benefiting from the common
+thermochemical recovery, chemistry-Jacobian, catalytic-wall and
+heat-reporting hardening.
+
+---
+
+## 22. AIR-7 Mutation++ Support
+
+AIR-7 is the reduced ionized-air model introduced permanently for the
+NEMO regression and production workflow.
+
+Permanent species set:
+
+`e-, N2, O2, NO, N, O, NO+`
+
+The required Mutation++ assets are now version-controlled:
+
+- `data/mixtures/air_7.xml`;
+- `data/mechanisms/air7_Park.xml`.
+
+The AIR-7 mechanism contains the retained neutral dissociation/exchange
+chemistry and the reduced associative-ionization reaction required by
+the seven-species model.
+
+Implemented AIR-7 functionality includes:
+
+- ionized Mutation++ thermodynamics;
+- electron-aware pressure;
+- two-temperature thermodynamics;
+- chemistry;
+- complete V-E/electron energy-transfer source;
+- implicit chemistry Jacobian;
+- implicit V-E source Jacobian;
+- conservative `dT/dU`;
+- conservative `dTve/dU`;
+- non-catalytic wall operation;
+- catalytic wall operation;
+- explicit NEMO integration;
+- implicit NEMO integration;
+- steady and physical-time NEMO execution;
+- accepted-state recovery and conservative update limiting;
+- ionized ambipolar Stefan-Maxwell transport.
+
+### 22.1 AIR-7 thermodynamic validation
+
+AIR-7 has a dedicated conservative finite-difference thermodynamic
+derivative regression.
+
+The test verifies that temperatures recovered through Mutation++ are
+consistent with derivatives used by the implicit NEMO formulation.
+
+### 22.2 AIR-7 implicit validation
+
+AIR-7 was exercised with `EULER_IMPLICIT` and BCGSTAB through both
+steady/non-catalytic development cases and physical-time regression
+runs.
+
+Transient implicit AIR-7 runs completed successfully and wrote valid
+restart and visualization output.
+
+The adaptive physical-Courant path was also exercised with AIR-7.
+
+### 22.3 AIR-7 catalytic and non-catalytic behavior
+
+The same permanent NEMO solver supports both:
+
+- no catalytic wall source/flux modification;
+- finite-rate catalytic recombination through the catalytic-wall path.
+
+The gas model itself is not duplicated between these cases.  Catalysis
+is a wall-boundary choice applied to the same AIR-7 Mutation++ fluid
+model.
+
+---
+
+## 23. AIR-11 Mutation++ Support
+
+AIR-11 is the full ionized air model used for the strongest
+extreme-Mach validation in this work.
+
+Mutation++ AIR-11 species ordering is:
+
+`e-, N+, O+, NO+, N2+, O2+, N, O, NO, N2, O2`
+
+Implemented AIR-11 functionality includes:
+
+- ionized two-temperature thermodynamics;
+- electron-aware pressure;
+- heavy-particle translational gamma treatment;
+- finite-rate chemistry;
+- complete Mutation++ V-E/electron energy-transfer source;
+- implicit chemistry Jacobian;
+- implicit V-E source Jacobian;
+- conservative `dT/dU`;
+- conservative `dTve/dU`;
+- conservative `dP/dU`;
+- thermochemical accepted-state recovery;
+- implicit admissibility/backtracking;
+- non-catalytic walls;
+- catalytic walls;
+- explicit flow integration;
+- implicit flow integration;
+- ambipolar Stefan-Maxwell transport;
+- exact catalytic-wall species-flux heat reporting.
+
+### 23.1 AIR-11 non-catalytic validation
+
+AIR-11 non-catalytic cases were exercised with both:
+
+- `EULER_EXPLICIT`;
+- `EULER_IMPLICIT`.
+
+Both first-order and MUSCL development cases were exercised during the
+physical-validation campaign.
+
+Successful implicit runs produced restart and solution output and exited
+normally.
+
+### 23.2 AIR-11 catalytic validation
+
+The final production-style catalytic AIR-11 smoke used:
+
+- `NEMO_NAVIER_STOKES`;
+- `FLUID_MODEL = MUTATIONPP`;
+- `GAS_MODEL = air_11`;
+- `IONIZATION = YES`;
+- Mach `23.9`;
+- freestream pressure `19.7 Pa`;
+- `T = 254 K`;
+- `Tve = 254 K`;
+- wall temperature `550 K`;
+- catalytic efficiency `0.2`;
+- dimensional formulation;
+- `EULER_IMPLICIT`;
+- BCGSTAB;
+- CFL `0.1`.
+
+The exact preserved initial restart SHA-256 was:
+
+`092b305eaa18c133fbf6cf42312a6bd2d76241f4412c32bd45783c3b8881a60f`
+
+Three implicit iterations completed successfully.
+
+Reported total heat flux:
+
+- iteration 0: `1.1108e+07`;
+- iteration 1: `1.1099e+07`;
+- iteration 2: `1.1091e+07`.
+
+The run terminated through normal `Exit Success (SU2_CFD)`.
+
+---
+
+## 24. Catalytic and Non-Catalytic Wall Support
+
+Catalytic behavior is integrated into the existing NEMO wall boundary
+treatment; it is not implemented as a separate solver.
+
+The supported wall concepts are:
+
+### 24.1 Non-catalytic wall
+
+No catalytic recombination flux is imposed.
+
+This remains the baseline wall treatment for comparison with catalytic
+cases.
+
+### 24.2 Finite-rate / partial catalytic wall
+
+A finite catalytic efficiency controls the recombination response at the
+wall.
+
+The hardening ensures that:
+
+- the catalytic species residual is treated consistently;
+- the catalytic-wall Jacobian follows the same species-flux definition;
+- heat-flux reporting uses the actual wall species viscous flux;
+- the species enthalpy contribution is computed from that exact flux.
+
+### 24.3 Fully catalytic finite-rate limit
+
+The fully catalytic limit corresponds to the finite-rate catalytic
+formulation with maximum catalytic efficiency (`gamma = 1`).
+
+It uses the same wall-flux formulation rather than an unrelated heat-flux
+reconstruction.
+
+### 24.4 Supercatalytic branch
+
+The existing NEMO supercatalytic branch is retained.
+
+The hardening work does not replace its physical definition with the
+finite-rate catalytic model.
+
+The important distinction is preserved:
+
+- finite-rate catalytic behavior controls recombination through the
+  catalytic efficiency;
+- supercatalytic behavior follows the separate NEMO supercatalytic wall
+  treatment.
+
+### 24.5 Exact catalytic heat reporting
+
+The catalytic heat-flux correction stores and reuses the actual
+wall-normal species viscous flux generated by the wall boundary
+condition.
+
+The reported species enthalpy contribution is therefore
+
+`sum_s J_s h_s`
+
+using the same `J_s` that enters the boundary residual.
+
+This removes the previously identified inconsistent reconstruction and
+extra-area scaling behavior.
+
+---
+
+## 25. Explicit and Implicit NEMO Support
+
+Both existing NEMO time-discretization paths remain available:
+
+- `EULER_EXPLICIT`;
+- `EULER_IMPLICIT`.
+
+No separate implicit solver was created.
+
+### 25.1 Implicit chemistry
+
+For Mutation++, the implicit chemistry implementation contains:
+
+- Mutation++ analytic species-density chemistry derivatives where
+  available;
+- centered temperature derivatives;
+- conservative-variable chain-rule assembly;
+- a separate complete V-E source Jacobian generated from
+  `energyTransferSource()`.
+
+Finite-difference chemistry/V-E regression coverage exists for:
+
+- AIR-5;
+- AIR-7;
+- AIR-11.
+
+### 25.2 Implicit thermodynamic derivatives
+
+Mutation++-consistent thermodynamic derivatives are used by the
+implicit NEMO formulation.
+
+Validation includes:
+
+- AIR-7 `dT/dU`;
+- AIR-7 `dTve/dU`;
+- AIR-11 `dT/dU`;
+- AIR-11 `dTve/dU`;
+- AIR-11 `dP/dU`.
+
+### 25.3 AIR-11 pressure Jacobian
+
+The final pressure-Jacobian correction computes
+
+`dp/dU_j =
+    rhoR_heavy * dT/dU_j
+  + rhoR_electron * dTve/dU_j
+  + direct species-density term`
+
+for Mutation++.
+
+Before correction, affected AIR-11 pressure-derivative columns showed
+large finite-difference inconsistency.
+
+After correction:
+
+- focused AIR-11 regression: 88 assertions passed;
+- maximum relative pressure derivative error: `1.2992e-06`;
+- acceptance tolerance: `5.0e-04`.
+
+### 25.4 Implicit admissibility
+
+The implicit update path includes thermochemical admissibility handling
+and conservative-step backtracking.
+
+A dedicated AIR-11 regression verifies that an invalid full conservative
+energy update is rejected and a realizable backtracked state is found
+without corrupting the accepted live solution.
+
+---
+
+## 26. Transport Support by Gas Model
+
+### 26.1 AIR-5
+
+AIR-5 contains no free electron.
+
+It therefore does not require the ionized ambipolar Stefan-Maxwell
+closure.
+
+### 26.2 AIR-7 and AIR-11
+
+Ionized Mutation++ mixtures use the hardened Stefan-Maxwell path.
+
+The implemented closure includes:
+
+- multicomponent Stefan-Maxwell diffusion;
+- electron transport;
+- ambipolar electric-field closure;
+- composition-gradient driving;
+- barodiffusion;
+- two-temperature partial-pressure driving;
+- species flux `-rho Y_s V_s`;
+- electron contribution to energy diffusion;
+- roundoff-level total species-flux correction.
+
+No explicit Soret contribution is claimed.
+
+The correct description is:
+
+> Mutation++ Stefan-Maxwell ambipolar closure with
+> composition/barodiffusion/two-temperature partial-pressure driving,
+> without explicit Soret diffusion.
+
+---
+
+## 27. Electron and Electronic Energy Treatment
+
+Ionized AIR-7/AIR-11 calculations retain Mutation++ as the authority for
+the complete V-E/electron energy-transfer source.
+
+Mutation++ `energyTransferSource()` provides the relevant combined
+energy-transfer mechanisms.
+
+The SU2 wrapper therefore does not add a second independent electronic
+source that would double-count the Mutation++ contribution.
+
+Electron-aware behavior also enters:
+
+- pressure;
+- `rhoCvve`;
+- `dT/dU`;
+- `dTve/dU`;
+- `dP/dU`;
+- Stefan-Maxwell transport;
+- energy diffusion.
+
+---
+
+## 28. Thermochemical Recovery and Extreme-Mach Robustness
+
+The same production NEMO conservative-to-primitive recovery is used for
+AIR-5, AIR-7 and AIR-11.
+
+The hardened path includes:
+
+- accepted-state preservation;
+- trial-state rejection;
+- controlled retry;
+- conservative backtracking;
+- species positivity protection;
+- thermochemical closure verification;
+- fallback only after failed admissible candidates;
+- backend-aware temperature admissibility.
+
+Mutation++ is not subjected to the native fixed high-temperature ceiling
+used by the native thermochemical backend.
+
+---
+
+## 29. Dimensional Mutation++ Production Contract
+
+The validated Mutation++ NEMO implementation is dimensional.
+
+Production Mutation++ cases must use:
+
+`REF_DIMENSIONALIZATION = DIMENSIONAL`
+
+This is intentional.
+
+The current wrapper passes dimensional thermodynamics, chemistry and
+transport information directly to/from Mutation++.
+
+Unsupported nondimensional Mutation++ configurations fail explicitly
+instead of mixing dimensional Mutation++ properties with
+nondimensional SU2 state variables.
+
+---
+
+## 30. Validation Coverage Summary
+
+Permanent focused Mutation++/NEMO regression after the final
+pressure-Jacobian correction:
+
+- 940 assertions;
+- 11 test cases;
+- all passed.
+
+The permanent regression inventory includes coverage for:
+
+- AIR-5 chemistry;
+- AIR-5 V-E source;
+- AIR-5 accepted-state recovery;
+- AIR-5 Euler recovery;
+- AIR-5 enthalpy;
+- AIR-5 catalytic-wall Jacobian;
+- AIR-7 thermodynamic derivatives;
+- AIR-7 chemistry;
+- AIR-7 V-E source;
+- AIR-11 thermodynamic derivatives;
+- AIR-11 chemistry;
+- AIR-11 V-E source;
+- AIR-11 ionized gamma;
+- AIR-11 implicit admissibility;
+- AIR-11 pressure derivative.
+
+Actual CFD/runtime coverage additionally included:
+
+- AIR-5 implicit physical-time execution;
+- AIR-7 explicit and implicit execution;
+- AIR-7 physical-time implicit execution;
+- AIR-11 non-catalytic explicit execution;
+- AIR-11 non-catalytic implicit execution;
+- AIR-11 catalytic implicit execution.
+
+---
+
+## 31. Validation-Scope Qualification
+
+Implementation support and validation evidence must not be confused.
+
+The permanent solver supports the common NEMO infrastructure across
+AIR-5, AIR-7 and AIR-11 for non-catalytic/catalytic and
+explicit/implicit operation.
+
+However, this report does not claim that every possible combination of:
+
+- gas model;
+- wall model;
+- mesh;
+- catalytic efficiency;
+- explicit/implicit scheme;
+- first-/second-order spatial reconstruction
+
+has received an identical long converged CFD validation.
+
+Dedicated validation was concentrated where the implementation change
+was physically or numerically sensitive.
+
+For production scientific claims, each final geometry/freestream/wall
+configuration must still be converged and subjected to mesh independence
+and appropriate reference-data comparison.
+
+---
+
+## 32. Complete Permanent Production State
+
+The final permanent implementation therefore contains:
+
+1. NEMO extreme-Mach conservative-state hardening.
+2. Accepted-state recovery and fallback protection.
+3. Species positivity and update limiting.
+4. Backend-aware thermochemical admissibility.
+5. Mutation++ AIR-5 support.
+6. Permanent ionized AIR-7 mechanism and mixture.
+7. Mutation++ AIR-11 support.
+8. Non-catalytic wall operation.
+9. Finite-rate catalytic wall operation.
+10. Fully catalytic finite-rate limit.
+11. Existing supercatalytic wall branch preservation.
+12. Exact catalytic species-flux heat reporting.
+13. Explicit NEMO integration.
+14. Implicit NEMO integration.
+15. Mutation++ implicit chemistry Jacobians.
+16. Mutation++ complete V-E source Jacobians.
+17. AIR-7/AIR-11 two-temperature derivative consistency.
+18. AIR-11 pressure Jacobian consistency.
+19. Implicit thermochemical admissibility/backtracking.
+20. AIR-7/AIR-11 ionized ambipolar Stefan-Maxwell transport.
+21. Electron energy-diffusion consistency.
+22. Mutation++ Stefan-Maxwell thread safety.
+23. Eigen shared-library symbol isolation.
+24. Dimensional-only Mutation++ production contract.
+25. Permanent finite-difference regression coverage.
+26. Permanent implementation/validation artifacts.
+27. Reproducible Mutation++ submodule commit.
+28. Fresh-clone GitHub reproducibility.
+
+No temporary `.before_*` source files or temporary validation run
+directories are required by the production solver.
+
+The repository is intended to be used from the permanent Git history,
+not from temporary patch application.
+
+---
+
+## 33. Production Use Recommendation
+
+For production simulations:
+
+1. checkout the published NEMO hardening branch/tag;
+2. initialize the published Mutation++ submodule;
+3. use dimensional Mutation++ NEMO;
+4. select AIR-5, AIR-7 or AIR-11 as required;
+5. select non-catalytic or catalytic wall behavior according to the
+   physical problem;
+6. use explicit or implicit integration according to the simulation
+   requirements;
+7. retain the validated thermochemical recovery protections;
+8. establish CFD convergence independently for the actual production
+   case;
+9. perform mesh independence;
+10. compare heat flux, shock position, temperatures and species against
+    an appropriately matched reference before claiming physical
+    validation.
+
+The solver hardening phase is complete.  Further source modifications
+should be driven by a new reproducible defect rather than by routine
+production-case tuning.

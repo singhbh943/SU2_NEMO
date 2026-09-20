@@ -30,3 +30,35 @@ No PATO solver is run by the generator. This separates:
 The current direct heat-flux case is for coupling verification only.
 B-prime, pyrolysis/blowing feedback, wall-temperature feedback, and
 recession feedback remain later coupling levels.
+
+## Execution-path smoke validation
+
+The first generated `TEST_ONLY` case was successfully exercised with the
+source-built PATOx using OpenFOAM 7. The isolated smoke case used two
+timesteps of `1e-12 s`.
+
+The execution path reached:
+
+```text
+blockMesh
+  -> PATOx
+  -> PureConduction EnergyModel
+  -> Ta linear solve
+  -> time = 1e-12 s
+  -> time = 2e-12 s
+```
+
+This validates the software plumbing from the exported SU2 wall load to
+the PATO temperature boundary and solver execution. It does **not**
+validate physical TPS temperatures because the current SU2 load package
+comes from a non-converged development solution.
+
+OpenFOAM normally prints:
+
+```text
+sigFpe : Enabling floating point exception trapping (FOAM_SIGFPE).
+```
+
+at startup. This is not a floating-point crash. The permanent smoke
+runner detects only actual fatal signatures such as `FOAM FATAL ERROR`,
+`Segmentation fault`, or a real `Floating point exception (core dumped)`.

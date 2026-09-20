@@ -62,3 +62,34 @@ sigFpe : Enabling floating point exception trapping (FOAM_SIGFPE).
 at startup. This is not a floating-point crash. The permanent smoke
 runner detects only actual fatal signatures such as `FOAM FATAL ERROR`,
 `Segmentation fault`, or a real `Floating point exception (core dumped)`.
+
+## Converged-load production gate
+
+A permanent production gate is provided by:
+
+```bash
+tools/prepare_su2_pato_converged_load.sh \
+    <su2_case_dir> \
+    <convergence_log> \
+    <output_dir> \
+    [initial_wall_temperature_K]
+```
+
+The tool never runs SU2 or PATO. It refuses to produce a production load
+package when the supplied SU2 log contains explicit non-convergence
+evidence or when convergence cannot be positively verified.
+
+Only after the convergence gate passes does it:
+
+1. export `soln_surface.vtu`;
+2. validate pressure, temperatures, heat flux and AIR11 mass fractions;
+3. create the direct PATO `basicWallHeatFluxTemperature` point-load snippet;
+4. record SHA256 hashes of the SU2 VTU, convergence log and exported CSV;
+5. write `SU2_PATO_CONVERGED_LOAD_MANIFEST.json`.
+
+The generated direct PATO load is explicitly scoped as a **1-D maximum
+absolute wall-heat-flux point load**. Full spatial face-to-face mapping
+is a later coupling stage.
+
+The earlier `AIR11_TPS_TEST_ONLY` and smoke cases remain non-physical
+development artifacts and are not promoted by this gate.

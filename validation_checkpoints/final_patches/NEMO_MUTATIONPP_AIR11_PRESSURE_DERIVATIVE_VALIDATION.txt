@@ -1,0 +1,163 @@
+NEMO MUTATION++ AIR11 PRESSURE-DERIVATIVE HARDENING
+====================================================
+
+Parent:
+7b27e34dd73ee1b11c3fcaff07e60c8098f25f79
+
+Scope
+-----
+This change is limited to the Mutation++ NEMO thermodynamic
+pressure derivative used by the implicit Jacobian.
+
+The native CNEMOGas::ComputedPdU() implementation body was not changed.
+
+Problem
+-------
+NEMO pressure for an ionized two-temperature mixture is evaluated as
+
+  p = sum_e rho_s (Ru/M_s) Tve
+    + sum_h rho_s (Ru/M_s) T
+
+but the inherited CNEMOGas::ComputedPdU() closed-form derivative was
+not consistent with Mutation++ ChemNonEqTTv's two-mode energy
+definition.
+
+Before the fix, an AIR11 conservative finite-difference regression
+showed large pressure-derivative errors while dT/dU and dTve/dU
+remained accurate.
+
+Observed pre-fix examples:
+  relative dP/dU error ~0.35--0.72
+  pressure derivative failures = 13
+
+Implementation
+--------------
+CNEMOGas::ComputedPdU() was made virtual.
+
+CMutationTCLib supplies a Mutation++-specific override using
+
+  dp/dU_j =
+      rhoR_heavy    * dT/dU_j
+    + rhoR_electron * dTve/dU_j
+    + direct species-density pressure contribution
+
+where the temperature derivatives are the already validated
+Mutation++-consistent derivatives.
+
+Validation
+----------
+
+1. Focused AIR11 conservative finite-difference regression
+
+  All tests passed:
+    88 assertions
+    1 test case
+
+  Maximum reported relative pressure-derivative error:
+    1.2992e-06
+
+  Acceptance tolerance:
+    5.0e-04
+
+  Result:
+    AIR11_PRESSURE_FINITE_DIFFERENCE=PASS
+
+2. Full Mutation++ / NEMO unit regression
+
+  All tests passed:
+    940 assertions
+    11 test cases
+
+  Result:
+    FULL_MUTATIONPP_NEMO_REGRESSION=PASS
+
+3. Production-style AIR11 implicit runtime smoke
+
+  Solver:
+    NEMO_NAVIER_STOKES
+
+  Backend:
+    MUTATIONPP / air_11
+
+  Ionization:
+    YES
+
+  Mach:
+    23.9
+
+  Freestream:
+    p   = 19.7 Pa
+    T   = 254 K
+    Tve = 254 K
+
+  Wall:
+    550 K
+    partial catalytic efficiency = 0.2
+
+  Reference mode:
+    DIMENSIONAL
+
+  Time discretization:
+    EULER_IMPLICIT
+
+  Linear solver:
+    BCGSTAB
+    tolerance = 1E-6
+    max iterations = 5
+
+  CFL:
+    0.1
+
+  Runtime iterations:
+    3
+
+  Exact initial restart SHA256:
+    092b305eaa18c133fbf6cf42312a6bd2d76241f4412c32bd45783c3b8881a60f
+
+  Expected preserved restart SHA256:
+    092b305eaa18c133fbf6cf42312a6bd2d76241f4412c32bd45783c3b8881a60f
+
+  Working restart SHA256 after runtime:
+    abe6c50be9354608b19968172f2a80d98315a20a352c4cb8390867bd00c58ae5
+
+  Runtime log SHA256:
+    b2cd475c1b83161c5ecb1d606a3ce0ce43cbacafee69c6f12b4953f0ae8cedec
+
+  Iteration heat flux:
+    iter 0 = 1.1108e+07
+    iter 1 = 1.1099e+07
+    iter 2 = 1.1091e+07
+
+  Solver exit:
+    Exit Success (SU2_CFD)
+
+  Result:
+    IMPLICIT_JACOBIAN_PATH=EXERCISED
+    NUMERIC_ITERATIONS=PASS
+    AIR11_HEATFLUX_FINITE=PASS
+    SU2_EXIT_SUCCESS=PASS
+
+Mesh-quality note
+-----------------
+SU2 prints
+
+  Orthogonality Angle (deg.) = nan / nan
+
+during geometry-quality preprocessing for this mesh.
+
+This is a mesh-quality reporting value, not a flow solution
+non-finite.  The flow/runtime non-finite scan excludes only this
+specific preprocessing line.  All actual solver iteration values
+used for this validation are finite.
+
+Final
+-----
+LEGACY_DPDUDERIVATIVE_DEFECT=PROVEN
+MUTATIONPP_DPDUDERIVATIVE_CHAIN_RULE=IMPLEMENTED
+AIR11_PRESSURE_FINITE_DIFFERENCE=PASS
+FULL_MUTATIONPP_NEMO_REGRESSION=PASS
+AIR11_CORRECTED_DPDUDERIVATIVE_IMPLICIT_SMOKE=PASS
+EXACT_2000_ITER_RESTART=PASS
+NATIVE_CNEMOGAS_FORMULA_BODY=UNCHANGED
+NO_BUILD_REPEATED=PASS
+NO_CFD_RERUN_REPEATED=PASS

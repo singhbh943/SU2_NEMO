@@ -92,6 +92,15 @@ public:
   void ComputedTdU(const su2double *V, su2double *val_dTdU) final;
 
   /*!
+   * \brief Compute dP/dU consistently with the Mutation++ two-temperature
+   * energy definition.
+   */
+  void ComputedPdU(const su2double *V,
+                   const vector<su2double>& val_eves,
+                   su2double *val_dPdU) final;
+
+
+  /*!
    * \brief Compute mixture energies (total internal energy and vibrational energy).
    */
   vector<su2double>& ComputeMixtureEnergies() final;

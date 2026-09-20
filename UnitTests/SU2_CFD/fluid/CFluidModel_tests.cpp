@@ -1327,6 +1327,7 @@ TEST_CASE(
   const unsigned long nPrimVar = nSpecies + nDim + 10;
   const unsigned long nPrimVarGrad = nSpecies + nDim + 8;
 
+  const unsigned long P_INDEX = nSpecies + nDim + 2;
   CMutationTCLib fluid_model(config.get(), nDim);
 
   const su2double T = 12000.0;
@@ -1365,10 +1366,13 @@ TEST_CASE(
   for (size_t i = 0; i < nVar; ++i)
     U0[i] = nodes.GetSolution(0, i);
 
+  std::vector<su2double> analytic_dPdU(nVar, 0.0);
+
   std::vector<su2double> analytic_dTdU(nVar, 0.0);
   std::vector<su2double> analytic_dTvedU(nVar, 0.0);
 
   for (size_t i = 0; i < nVar; ++i) {
+    analytic_dPdU[i] = nodes.GetdPdU(0)[i];
     analytic_dTdU[i] = nodes.GetdTdU(0)[i];
     analytic_dTvedU[i] = nodes.GetdTvedU(0)[i];
   }
@@ -1383,9 +1387,10 @@ TEST_CASE(
         nodes.SetPrimVar(0, &fluid_model);
     REQUIRE_FALSE(nonphysical);
 
-    return std::array<su2double, 2>{
-        nodes.GetTemperature(0),
-        nodes.GetTemperature_ve(0)};
+    return std::array<su2double, 3>{
+          nodes.GetTemperature(0),
+          nodes.GetTemperature_ve(0),
+          nodes.GetPrimitive(0)[P_INDEX]};
   };
 
   for (size_t column = 0; column < nVar; ++column) {
@@ -1428,6 +1433,21 @@ TEST_CASE(
         (plus[0] - minus[0]) / (2.0 * delta);
     const su2double fd_dTvedU =
         (plus[1] - minus[1]) / (2.0 * delta);
+      const su2double fd_dPdU =
+          (plus[2] - minus[2]) / (2.0 * delta);
+
+    const su2double scale_P =
+
+        std::max(
+
+            su2double(1.0),
+
+            std::max(
+
+                std::abs(fd_dPdU),
+
+                std::abs(analytic_dPdU[column])));
+
 
     const su2double scale_T =
         std::max(
@@ -1443,6 +1463,17 @@ TEST_CASE(
                 std::abs(fd_dTvedU),
                 std::abs(analytic_dTvedU[column])));
 
+    const su2double error_P =
+
+        std::abs(
+
+            analytic_dPdU[column] -
+
+            fd_dPdU) /
+
+        scale_P;
+
+
     const su2double error_T =
         std::abs(
             analytic_dTdU[column] -
@@ -1457,12 +1488,17 @@ TEST_CASE(
 
     CAPTURE(
         column,
+          analytic_dPdU[column],
+          fd_dPdU,
+          error_P,
         analytic_dTdU[column],
         fd_dTdU,
         error_T,
         analytic_dTvedU[column],
         fd_dTvedU,
         error_Tve);
+
+    CHECK(error_P < 5.0e-4);
 
     CHECK(error_T < 5.0e-4);
     CHECK(error_Tve < 5.0e-4);

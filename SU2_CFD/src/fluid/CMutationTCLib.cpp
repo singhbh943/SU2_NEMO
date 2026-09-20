@@ -300,6 +300,116 @@ void CMutationTCLib::ComputedTdU(const su2double *V, su2double *val_dTdU){
       -1.0 / rhoCvtr_local;
 }
 
+
+void CMutationTCLib::ComputedPdU(
+    const su2double *V,
+    const vector<su2double>& val_eves,
+    su2double *val_dPdU) {
+
+  if (val_dPdU == nullptr)
+    SU2_MPI::Error(
+        "Array dPdU not allocated!",
+        CURRENT_FUNCTION);
+
+  const unsigned short nVarLocal =
+      nSpecies + nDim + 2;
+
+  const unsigned long T_INDEX =
+      nSpecies;
+
+  const unsigned long TVE_INDEX =
+      nSpecies + 1;
+
+  /*
+   * NEMO evaluates pressure as
+   *
+   *   p =
+   *     sum_e rho_s (Ru/M_s) Tve
+   *     + sum_h rho_s (Ru/M_s) T.
+   *
+   * The inherited CNEMOGas closed-form derivative predates
+   * Mutation++ ChemNonEqTTv's two-mode energy definition.
+   *
+   * Build dp/dU directly from the pressure chain rule using
+   * the already validated Mutation++-consistent dT/dU and
+   * dTve/dU derivatives.
+   */
+  vector<su2double> dTdU_local(
+      nVarLocal, 0.0);
+
+  vector<su2double> dTvedU_local(
+      nVarLocal, 0.0);
+
+  ComputedTdU(
+      V,
+      dTdU_local.data());
+
+  ComputedTvedU(
+      V,
+      val_eves,
+      dTvedU_local.data());
+
+  const auto& molar_mass =
+      GetSpeciesMolarMass();
+
+  su2double rhoR_electron = 0.0;
+  su2double rhoR_heavy = 0.0;
+
+  for (iSpecies = 0;
+       iSpecies < nEl;
+       ++iSpecies) {
+
+    rhoR_electron +=
+        V[iSpecies]
+        * Ru
+        / molar_mass[iSpecies];
+  }
+
+  for (iSpecies = nEl;
+       iSpecies < nSpecies;
+       ++iSpecies) {
+
+    rhoR_heavy +=
+        V[iSpecies]
+        * Ru
+        / molar_mass[iSpecies];
+  }
+
+  for (unsigned short iVar = 0;
+       iVar < nVarLocal;
+       ++iVar) {
+
+    val_dPdU[iVar] =
+        rhoR_heavy
+            * dTdU_local[iVar]
+        + rhoR_electron
+            * dTvedU_local[iVar];
+  }
+
+  /*
+   * Direct partial-density contribution at fixed
+   * T and Tve.
+   */
+  for (iSpecies = 0;
+       iSpecies < nSpecies;
+       ++iSpecies) {
+
+    const bool electron =
+        (iSpecies < nEl);
+
+    const su2double species_temperature =
+        electron
+            ? V[TVE_INDEX]
+            : V[T_INDEX];
+
+    val_dPdU[iSpecies] +=
+        Ru
+        / molar_mass[iSpecies]
+        * species_temperature;
+  }
+}
+
+
 vector<su2double>& CMutationTCLib::ComputeMixtureEnergies(){
 
   SetTDStateRhosTTv(rhos, T, Tve);

@@ -1,0 +1,253 @@
+diff --git a/SU2_CFD/include/fluid/CMutationTCLib.hpp b/SU2_CFD/include/fluid/CMutationTCLib.hpp
+index 2092991ad1..19a6235f8a 100644
+--- a/SU2_CFD/include/fluid/CMutationTCLib.hpp
++++ b/SU2_CFD/include/fluid/CMutationTCLib.hpp
+@@ -91,6 +91,15 @@ public:
+    */
+   void ComputedTdU(const su2double *V, su2double *val_dTdU) final;
+ 
++  /*!
++   * \brief Compute dP/dU consistently with the Mutation++ two-temperature
++   * energy definition.
++   */
++  void ComputedPdU(const su2double *V,
++                   const vector<su2double>& val_eves,
++                   su2double *val_dPdU) final;
++
++
+   /*!
+    * \brief Compute mixture energies (total internal energy and vibrational energy).
+    */
+diff --git a/SU2_CFD/include/fluid/CNEMOGas.hpp b/SU2_CFD/include/fluid/CNEMOGas.hpp
+index 475b294683..b3e263bfd9 100644
+--- a/SU2_CFD/include/fluid/CNEMOGas.hpp
++++ b/SU2_CFD/include/fluid/CNEMOGas.hpp
+@@ -235,7 +235,7 @@ public:
+   /*!
+    * \brief Compute derivative of pressure w.r.t. conservative variables.
+    */
+-  void ComputedPdU(const su2double *V, const vector<su2double>& val_eves, su2double *val_dPdU);
++  virtual void ComputedPdU(const su2double *V, const vector<su2double>& val_eves, su2double *val_dPdU);
+ 
+   /*!
+    * \brief Compute derivative of temperature w.r.t. conservative variables.
+diff --git a/SU2_CFD/src/fluid/CMutationTCLib.cpp b/SU2_CFD/src/fluid/CMutationTCLib.cpp
+index 48f9f6372f..9dc28efedb 100644
+--- a/SU2_CFD/src/fluid/CMutationTCLib.cpp
++++ b/SU2_CFD/src/fluid/CMutationTCLib.cpp
+@@ -300,6 +300,116 @@ void CMutationTCLib::ComputedTdU(const su2double *V, su2double *val_dTdU){
+       -1.0 / rhoCvtr_local;
+ }
+ 
++
++void CMutationTCLib::ComputedPdU(
++    const su2double *V,
++    const vector<su2double>& val_eves,
++    su2double *val_dPdU) {
++
++  if (val_dPdU == nullptr)
++    SU2_MPI::Error(
++        "Array dPdU not allocated!",
++        CURRENT_FUNCTION);
++
++  const unsigned short nVarLocal =
++      nSpecies + nDim + 2;
++
++  const unsigned long T_INDEX =
++      nSpecies;
++
++  const unsigned long TVE_INDEX =
++      nSpecies + 1;
++
++  /*
++   * NEMO evaluates pressure as
++   *
++   *   p =
++   *     sum_e rho_s (Ru/M_s) Tve
++   *     + sum_h rho_s (Ru/M_s) T.
++   *
++   * The inherited CNEMOGas closed-form derivative predates
++   * Mutation++ ChemNonEqTTv's two-mode energy definition.
++   *
++   * Build dp/dU directly from the pressure chain rule using
++   * the already validated Mutation++-consistent dT/dU and
++   * dTve/dU derivatives.
++   */
++  vector<su2double> dTdU_local(
++      nVarLocal, 0.0);
++
++  vector<su2double> dTvedU_local(
++      nVarLocal, 0.0);
++
++  ComputedTdU(
++      V,
++      dTdU_local.data());
++
++  ComputedTvedU(
++      V,
++      val_eves,
++      dTvedU_local.data());
++
++  const auto& molar_mass =
++      GetSpeciesMolarMass();
++
++  su2double rhoR_electron = 0.0;
++  su2double rhoR_heavy = 0.0;
++
++  for (iSpecies = 0;
++       iSpecies < nEl;
++       ++iSpecies) {
++
++    rhoR_electron +=
++        V[iSpecies]
++        * Ru
++        / molar_mass[iSpecies];
++  }
++
++  for (iSpecies = nEl;
++       iSpecies < nSpecies;
++       ++iSpecies) {
++
++    rhoR_heavy +=
++        V[iSpecies]
++        * Ru
++        / molar_mass[iSpecies];
++  }
++
++  for (unsigned short iVar = 0;
++       iVar < nVarLocal;
++       ++iVar) {
++
++    val_dPdU[iVar] =
++        rhoR_heavy
++            * dTdU_local[iVar]
++        + rhoR_electron
++            * dTvedU_local[iVar];
++  }
++
++  /*
++   * Direct partial-density contribution at fixed
++   * T and Tve.
++   */
++  for (iSpecies = 0;
++       iSpecies < nSpecies;
++       ++iSpecies) {
++
++    const bool electron =
++        (iSpecies < nEl);
++
++    const su2double species_temperature =
++        electron
++            ? V[TVE_INDEX]
++            : V[T_INDEX];
++
++    val_dPdU[iSpecies] +=
++        Ru
++        / molar_mass[iSpecies]
++        * species_temperature;
++  }
++}
++
++
+ vector<su2double>& CMutationTCLib::ComputeMixtureEnergies(){
+ 
+   SetTDStateRhosTTv(rhos, T, Tve);
+diff --git a/UnitTests/SU2_CFD/fluid/CFluidModel_tests.cpp b/UnitTests/SU2_CFD/fluid/CFluidModel_tests.cpp
+index f9e304a8c8..3373057736 100644
+--- a/UnitTests/SU2_CFD/fluid/CFluidModel_tests.cpp
++++ b/UnitTests/SU2_CFD/fluid/CFluidModel_tests.cpp
+@@ -1327,6 +1327,7 @@ TEST_CASE(
+   const unsigned long nPrimVar = nSpecies + nDim + 10;
+   const unsigned long nPrimVarGrad = nSpecies + nDim + 8;
+ 
++  const unsigned long P_INDEX = nSpecies + nDim + 2;
+   CMutationTCLib fluid_model(config.get(), nDim);
+ 
+   const su2double T = 12000.0;
+@@ -1365,10 +1366,13 @@ TEST_CASE(
+   for (size_t i = 0; i < nVar; ++i)
+     U0[i] = nodes.GetSolution(0, i);
+ 
++  std::vector<su2double> analytic_dPdU(nVar, 0.0);
++
+   std::vector<su2double> analytic_dTdU(nVar, 0.0);
+   std::vector<su2double> analytic_dTvedU(nVar, 0.0);
+ 
+   for (size_t i = 0; i < nVar; ++i) {
++    analytic_dPdU[i] = nodes.GetdPdU(0)[i];
+     analytic_dTdU[i] = nodes.GetdTdU(0)[i];
+     analytic_dTvedU[i] = nodes.GetdTvedU(0)[i];
+   }
+@@ -1383,9 +1387,10 @@ TEST_CASE(
+         nodes.SetPrimVar(0, &fluid_model);
+     REQUIRE_FALSE(nonphysical);
+ 
+-    return std::array<su2double, 2>{
+-        nodes.GetTemperature(0),
+-        nodes.GetTemperature_ve(0)};
++    return std::array<su2double, 3>{
++          nodes.GetTemperature(0),
++          nodes.GetTemperature_ve(0),
++          nodes.GetPrimitive(0)[P_INDEX]};
+   };
+ 
+   for (size_t column = 0; column < nVar; ++column) {
+@@ -1428,6 +1433,21 @@ TEST_CASE(
+         (plus[0] - minus[0]) / (2.0 * delta);
+     const su2double fd_dTvedU =
+         (plus[1] - minus[1]) / (2.0 * delta);
++      const su2double fd_dPdU =
++          (plus[2] - minus[2]) / (2.0 * delta);
++
++    const su2double scale_P =
++
++        std::max(
++
++            su2double(1.0),
++
++            std::max(
++
++                std::abs(fd_dPdU),
++
++                std::abs(analytic_dPdU[column])));
++
+ 
+     const su2double scale_T =
+         std::max(
+@@ -1443,6 +1463,17 @@ TEST_CASE(
+                 std::abs(fd_dTvedU),
+                 std::abs(analytic_dTvedU[column])));
+ 
++    const su2double error_P =
++
++        std::abs(
++
++            analytic_dPdU[column] -
++
++            fd_dPdU) /
++
++        scale_P;
++
++
+     const su2double error_T =
+         std::abs(
+             analytic_dTdU[column] -
+@@ -1457,6 +1488,9 @@ TEST_CASE(
+ 
+     CAPTURE(
+         column,
++          analytic_dPdU[column],
++          fd_dPdU,
++          error_P,
+         analytic_dTdU[column],
+         fd_dTdU,
+         error_T,
+@@ -1464,6 +1498,8 @@ TEST_CASE(
+         fd_dTvedU,
+         error_Tve);
+ 
++    CHECK(error_P < 5.0e-4);
++
+     CHECK(error_T < 5.0e-4);
+     CHECK(error_Tve < 5.0e-4);
+   }

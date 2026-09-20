@@ -235,7 +235,7 @@ public:
   /*!
    * \brief Compute derivative of pressure w.r.t. conservative variables.
    */
-  void ComputedPdU(const su2double *V, const vector<su2double>& val_eves, su2double *val_dPdU);
+  virtual void ComputedPdU(const su2double *V, const vector<su2double>& val_eves, su2double *val_dPdU);
 
   /*!
    * \brief Compute derivative of temperature w.r.t. conservative variables.

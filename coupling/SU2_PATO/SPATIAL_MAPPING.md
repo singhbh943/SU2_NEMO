@@ -59,3 +59,34 @@ case is explicitly `TEST_ONLY` and is not a physical TPS result.
 
 The future production workflow uses the same topology and conservative
 mapping code only after the SU2 convergence gate passes.
+
+## Spatial PATO execution smoke
+
+The first spatial TEST_ONLY case was successfully executed with the
+source-built PATOx using OpenFOAM 7.
+
+Validated execution facts:
+
+- PATO `top` patch contains 138 faces;
+- OpenFOAM patch-face order is low-x to high-x;
+- the 138-value nonuniform `q` list matches the mapped face CSV exactly;
+- PATOx accepts the spatial `basicWallHeatFluxTemperature` field;
+- `Ta` is solved at `1e-12 s` and `2e-12 s`;
+- the final `Ta` field is written successfully.
+
+The source aerodynamic solution remains non-converged, so this validates
+software execution and spatial data alignment only. It is not a physical
+TPS result.
+
+The next coupling level is thermal two-way feedback:
+
+```text
+SU2 q_w(s)
+   -> PATO material response
+   -> PATO T_w(s)
+   -> SU2 isothermal wall temperature
+   -> recomputed aerodynamic q_w(s)
+```
+
+That feedback must preserve the same topology/arclength orientation and
+must not use a non-converged SU2 load as a production state.

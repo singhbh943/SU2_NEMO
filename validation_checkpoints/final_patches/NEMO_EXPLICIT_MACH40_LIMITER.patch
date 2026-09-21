@@ -1,0 +1,142 @@
+diff --git a/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp b/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
+index 34c9b0945e..01908e182a 100644
+--- a/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
++++ b/SU2_CFD/src/solvers/CNEMOEulerSolver.cpp
+@@ -1146,7 +1146,136 @@ void CNEMOEulerSolver::ClassicalRK4_Iteration(CGeometry *geometry, CSolver **sol
+ void CNEMOEulerSolver::ExplicitEuler_Iteration(CGeometry *geometry, CSolver **solver_container, CConfig *config) {
+   SU2_ZONE_SCOPED
+ 
+-  Explicit_Iteration<EULER_EXPLICIT>(geometry, solver_container, config, 0);
++  /*
++   * NEMO-specific explicit Euler conservative update.
++   *
++   * The generic explicit implementation applies
++   *
++   *   DeltaU = -(Residual + truncation error) * Delta_t / Volume
++   *
++   * directly to the conservative solution.  For NEMO, first store
++   * that candidate increment in LinSysSol so that the existing
++   * NEMO conservative-update limiter can determine a point-local
++   * admissible under-relaxation factor.
++   *
++   * This connects EULER_EXPLICIT to the same NEMO update-limiting
++   * infrastructure already used by the implicit path.
++   */
++
++  const bool adjoint = config->GetContinuous_Adjoint();
++
++  su2double resMax[MAXNVAR] = {0.0};
++  su2double resRMS[MAXNVAR] = {0.0};
++  unsigned long idxMax[MAXNVAR] = {0};
++
++  if (!adjoint) {
++
++    /*
++     * Construct the ordinary explicit Euler candidate update without
++     * applying it yet.
++     */
++    SU2_OMP_FOR_(schedule(static,omp_chunk_size) SU2_NOWAIT)
++    for (unsigned long iPoint = 0; iPoint < nPointDomain; ++iPoint) {
++
++      const su2double Vol =
++          geometry->nodes->GetVolume(iPoint)
++        + geometry->nodes->GetPeriodicVolume(iPoint);
++
++      const su2double Delta =
++          nodes->GetDelta_Time(iPoint) / Vol;
++
++      const su2double* Res_TruncError =
++          nodes->GetResTruncError(iPoint);
++
++      const su2double* Residual =
++          LinSysRes.GetBlock(iPoint);
++
++      for (unsigned short iVar = 0; iVar < nVar; ++iVar) {
++
++        const su2double Res =
++            Residual[iVar] + Res_TruncError[iVar];
++
++        const unsigned long index =
++            iPoint*nVar + iVar;
++
++        /*
++         * Candidate explicit conservative increment.
++         */
++        LinSysSol[index] = -Res*Delta;
++
++        ResidualReductions_PerThread(
++            iPoint,
++            iVar,
++            Res,
++            resRMS,
++            resMax,
++            idxMax);
++      }
++    }
++    END_SU2_OMP_FOR
++
++    /*
++     * Preserve the generic explicit residual accounting.
++     */
++    ResidualReductions_FromAllThreads(
++        geometry,
++        config,
++        resRMS,
++        resMax,
++        idxMax);
++
++    /*
++     * Critical NEMO step:
++     *
++     * LinSysSol now contains DeltaU.  Determine the admissible
++     * point-local conservative-update factor before changing U.
++     */
++    ComputeUnderRelaxationFactor(config);
++
++    /*
++     * Apply the limited explicit update:
++     *
++     *   U^(n+1) = U^n + alpha * DeltaU
++     */
++    SU2_OMP_FOR_STAT(omp_chunk_size)
++    for (unsigned long iPoint = 0; iPoint < nPointDomain; ++iPoint) {
++
++      const su2double alpha =
++          nodes->GetUnderRelaxation(iPoint);
++
++      for (unsigned short iVar = 0; iVar < nVar; ++iVar) {
++
++        const unsigned long index =
++            iPoint*nVar + iVar;
++
++        nodes->AddSolution(
++            iPoint,
++            iVar,
++            alpha*LinSysSol[index]);
++      }
++    }
++    END_SU2_OMP_FOR
++  }
++
++  /*
++   * Match the communication and verification sequence of the
++   * generic explicit implementation.
++   */
++  InitiateComms(
++      geometry,
++      config,
++      MPI_QUANTITIES::SOLUTION);
++
++  CompleteComms(
++      geometry,
++      config,
++      MPI_QUANTITIES::SOLUTION);
++
++  if (!adjoint) {
++    ComputeVerificationError(
++        geometry,
++        config);
++  }
+ }
+ 
+ void CNEMOEulerSolver::PrepareImplicitIteration(CGeometry *geometry, CSolver**, CConfig *config) {

@@ -757,11 +757,79 @@ void CNEMONSSolver::BC_IsothermalCatalytic_Wall(CGeometry *geometry,
           SdYdn += rho*Di[iSpecies]*dYdn;
         }
 
-        /*--- Calculate species residual at wall ---*/
+        /*--- Calculate the preliminary species residual at the wall. ---*/
         for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {
           dYdn = (Yst[iSpecies]-Vj[RHOS_INDEX+iSpecies]/Vj[RHO_INDEX])/dij;
-          Res_Visc[iSpecies]  = -(-rho*Di[iSpecies]*dYdn+Yst[iSpecies]*SdYdn)*Area;
+          Res_Visc[iSpecies] =
+              -(-rho*Di[iSpecies]*dYdn + Yst[iSpecies]*SdYdn)*Area;
         }
+
+        /*
+         * AIR-11 fully catalytic, impermeable-wall stoichiometric closure.
+         *
+         * Species ordering:
+         *   0 e-
+         *   1 N+
+         *   2 O+
+         *   3 NO+
+         *   4 N2+
+         *   5 O2+
+         *   6 N
+         *   7 O
+         *   8 NO
+         *   9 N2
+         *  10 O2
+         *
+         * The preliminary fixed-composition diffusion model guarantees only
+         * sum_s J_s = 0.  A passive non-ablating catalytic wall must also
+         * conserve N nuclei, O nuclei, and electric charge.
+         *
+         * Keep the incoming/reactant fluxes (ions, atoms and NO), then set
+         * electron, N2 and O2 fluxes from the corresponding conservation
+         * constraints.  Since Area is common to every species, the closure
+         * can be applied directly to Res_Visc.
+         */
+        if (nSpecies != 11) {
+          SU2_MPI::Error(
+              "The stoichiometric SUPERCATALYTIC_WALL closure currently "
+              "requires the AIR-11 species set.",
+              CURRENT_FUNCTION);
+        }
+
+        /*--- Zero net electric-current / charge flux. All ions are +1. ---*/
+        Res_Visc[0] =
+            Ms[0] *
+            (Res_Visc[1]/Ms[1] +
+             Res_Visc[2]/Ms[2] +
+             Res_Visc[3]/Ms[3] +
+             Res_Visc[4]/Ms[4] +
+             Res_Visc[5]/Ms[5]);
+
+        /*
+         * Nitrogen nuclei:
+         * N+, NO+, N2+, N, NO and N2 carry respectively
+         * 1, 1, 2, 1, 1 and 2 nitrogen atoms.
+         */
+        Res_Visc[9] =
+            -0.5*Ms[9] *
+            (Res_Visc[1]/Ms[1] +
+             Res_Visc[3]/Ms[3] +
+             2.0*Res_Visc[4]/Ms[4] +
+             Res_Visc[6]/Ms[6] +
+             Res_Visc[8]/Ms[8]);
+
+        /*
+         * Oxygen nuclei:
+         * O+, NO+, O2+, O, NO and O2 carry respectively
+         * 1, 1, 2, 1, 1 and 2 oxygen atoms.
+         */
+        Res_Visc[10] =
+            -0.5*Ms[10] *
+            (Res_Visc[2]/Ms[2] +
+             Res_Visc[3]/Ms[3] +
+             2.0*Res_Visc[5]/Ms[5] +
+             Res_Visc[7]/Ms[7] +
+             Res_Visc[8]/Ms[8]);
 
         if (implicit) {
           /*--- Initialize the transformation matrix ---*/
@@ -796,21 +864,69 @@ void CNEMONSSolver::BC_IsothermalCatalytic_Wall(CGeometry *geometry,
             Jacobian_j[iSpecies][iSpecies] += rho*Di[iSpecies]/dij - SdYdn;
           }
 
-          // Temperature
-          for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {
-            for (auto jSpecies = 0ul; jSpecies < nSpecies; jSpecies++) {
-              Jacobian_j[nSpecies+nDim][iSpecies] += Jacobian_j[jSpecies][iSpecies]*hs[iSpecies];
-            }
-            Jacobian_j[nSpecies+nDim][nSpecies+nDim] += Res_Visc[iSpecies]/Area*(Ru/Ms[iSpecies] +
-                                                                                 Cvtrs[iSpecies]  );
-            Jacobian_j[nSpecies+nDim][nSpecies+nDim+1] += Res_Visc[iSpecies]/Area*Cvve[iSpecies];
+          /*
+           * Apply the same AIR-11 stoichiometric closure to the species
+           * Jacobian rows. Rows 1--8 are the preliminary diffusion rows.
+           */
+
+          for (auto jVar = 0ul; jVar < nVar; jVar++) {
+
+            /* Charge closure: e- balances all singly-positive ions. */
+            Jacobian_j[0][jVar] =
+                Ms[0] *
+                (Jacobian_j[1][jVar]/Ms[1] +
+                 Jacobian_j[2][jVar]/Ms[2] +
+                 Jacobian_j[3][jVar]/Ms[3] +
+                 Jacobian_j[4][jVar]/Ms[4] +
+                 Jacobian_j[5][jVar]/Ms[5]);
+
+            /* Nitrogen closure through neutral N2. */
+            Jacobian_j[9][jVar] =
+                -0.5*Ms[9] *
+                (Jacobian_j[1][jVar]/Ms[1] +
+                 Jacobian_j[3][jVar]/Ms[3] +
+                 2.0*Jacobian_j[4][jVar]/Ms[4] +
+                 Jacobian_j[6][jVar]/Ms[6] +
+                 Jacobian_j[8][jVar]/Ms[8]);
+
+            /* Oxygen closure through neutral O2. */
+            Jacobian_j[10][jVar] =
+                -0.5*Ms[10] *
+                (Jacobian_j[2][jVar]/Ms[2] +
+                 Jacobian_j[3][jVar]/Ms[3] +
+                 2.0*Jacobian_j[5][jVar]/Ms[5] +
+                 Jacobian_j[7][jVar]/Ms[7] +
+                 Jacobian_j[8][jVar]/Ms[8]);
           }
 
-          // Vib.-El. Temperature
+          /*
+           * Energy derivative due to the species-flux Jacobian.
+           * The enthalpy/eve multiplier follows the summed species row,
+           * jSpecies, not the differentiation column iSpecies.
+           */
           for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {
-            for (auto jSpecies = 0ul; jSpecies < nSpecies; jSpecies++)
-              Jacobian_j[nSpecies+nDim+1][iSpecies] += Jacobian_j[jSpecies][iSpecies]*eves[iSpecies];
-            Jacobian_j[nSpecies+nDim+1][nSpecies+nDim+1] += Res_Visc[iSpecies]/Area*Cvve[iSpecies];
+            for (auto jSpecies = 0ul; jSpecies < nSpecies; jSpecies++) {
+              Jacobian_j[nSpecies+nDim][iSpecies] +=
+                  Jacobian_j[jSpecies][iSpecies]*hs[jSpecies];
+            }
+
+            Jacobian_j[nSpecies+nDim][nSpecies+nDim] +=
+                Res_Visc[iSpecies]/Area *
+                (Ru/Ms[iSpecies] + Cvtrs[iSpecies]);
+
+            Jacobian_j[nSpecies+nDim][nSpecies+nDim+1] +=
+                Res_Visc[iSpecies]/Area*Cvve[iSpecies];
+          }
+
+          /* Vib.-El. energy derivative due to species diffusion. */
+          for (auto iSpecies = 0ul; iSpecies < nSpecies; iSpecies++) {
+            for (auto jSpecies = 0ul; jSpecies < nSpecies; jSpecies++) {
+              Jacobian_j[nSpecies+nDim+1][iSpecies] +=
+                  Jacobian_j[jSpecies][iSpecies]*eves[jSpecies];
+            }
+
+            Jacobian_j[nSpecies+nDim+1][nSpecies+nDim+1] +=
+                Res_Visc[iSpecies]/Area*Cvve[iSpecies];
           }
 
           /*--- Multiply by the transformation matrix and store in Jac. ii ---*/

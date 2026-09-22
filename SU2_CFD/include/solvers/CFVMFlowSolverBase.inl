@@ -1,3 +1,4 @@
+#include <cstdlib>
 /*!
  * \file CFVMFlowSolverBase.inl
  * \brief Base class template for all FVM flow solvers.
@@ -2746,7 +2747,99 @@ void CFVMFlowSolverBase<V, FlowRegime>::Friction_Forces(const CGeometry* geometr
                 hs[iSpecies];
           }
 
-          HeatFlux[iMarker][iVertex] += sumJhs;
+          const su2double qConductive =
+              HeatFlux[iMarker][iVertex];
+
+          const su2double qCatalytic =
+              sumJhs;
+
+          /*
+           * The cached catalytic species flux uses the gas-residual
+           * orientation.  sum_s(J_s h_s) is therefore the gas-side
+           * enthalpy change.  Wall heat load is positive into the wall,
+           * so the corresponding catalytic wall contribution has the
+           * opposite sign.
+           */
+          HeatFlux[iMarker][iVertex] -= sumJhs;
+
+          /*
+           * Diagnostic output is restricted to the MPI rank that owns
+           * the physical node. HeatFlux is also evaluated on halo
+           * vertices elsewhere for visualization, so printing halos
+           * would duplicate physical wall locations.
+           */
+          static const bool wallQDebug = (std::getenv("SU2_NEMO_WALL_Q_DEBUG") != nullptr);
+          if (wallQDebug && geometry->nodes->GetDomain(iPoint)) {
+            const auto oldWallDebugPrecision = cout.precision();
+            cout.precision(17);
+
+            const auto globalPoint =
+                geometry->nodes->GetGlobalIndex(iPoint);
+
+            const auto CoordDbg =
+                geometry->nodes->GetCoord(iPoint);
+
+            const int mpiRank =
+                SU2_MPI::GetRank();
+
+            cout
+                << "[NEMO_WALL_Q_GLOBAL]"
+                << " rank=" << mpiRank
+                << " marker=" << iMarker
+                << " local_vertex=" << iVertex
+                << " local_point=" << iPoint
+                << " global_point=" << globalPoint
+                << " x=" << CoordDbg[0]
+                << " y=" << CoordDbg[1]
+                << " q_cond=" << qConductive
+                << " q_cat=" << qCatalytic
+                << " q_total=" << HeatFlux[iMarker][iVertex]
+                << endl;
+
+            su2double qSpeciesSumDbg = 0.0;
+
+            for (auto iSpeciesDbg = 0u;
+                 iSpeciesDbg < nSpecies;
+                 ++iSpeciesDbg) {
+
+              const su2double JsDbg =
+                  this->GetCatalyticWallSpeciesViscousFluxDensity(
+                      iMarker,
+                      iVertex,
+                      iSpeciesDbg);
+
+              const su2double hsDbg =
+                  hs[iSpeciesDbg];
+
+              const su2double JhDbg =
+                  JsDbg * hsDbg;
+
+              qSpeciesSumDbg += JhDbg;
+
+              cout
+                  << "[NEMO_WALL_Q_SPECIES]"
+                  << " rank=" << mpiRank
+                  << " global_point=" << globalPoint
+                  << " x=" << CoordDbg[0]
+                  << " y=" << CoordDbg[1]
+                  << " species=" << iSpeciesDbg
+                  << " J=" << JsDbg
+                  << " h=" << hsDbg
+                  << " Jh=" << JhDbg
+                  << endl;
+            }
+
+            cout
+                << "[NEMO_WALL_Q_CLOSURE]"
+                << " rank=" << mpiRank
+                << " global_point=" << globalPoint
+                << " q_cat=" << qCatalytic
+                << " sum_species_Jh=" << qSpeciesSumDbg
+                << " error=" << qSpeciesSumDbg-qCatalytic
+                << endl;
+
+            cout.precision(oldWallDebugPrecision);
+          }
         }
       }
 

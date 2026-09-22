@@ -1289,20 +1289,136 @@ void CNEMOEulerSolver::PrepareImplicitIteration(CGeometry *geometry, CSolver**, 
   PrepareImplicitIteration_impl(precond, geometry, config);
 }
 
-void CNEMOEulerSolver::CompleteImplicitIteration(CGeometry *geometry, CSolver**, CConfig *config) {
+void CNEMOEulerSolver::CompleteImplicitIteration(
+    CGeometry *geometry,
+    CSolver**,
+    CConfig *config) {
+
   SU2_ZONE_SCOPED
 
   /*
-   * Apply the standard NEMO conservative update limiter before the
-   * generic implicit solution update.  Thermochemical recovery is
-   * performed lazily by SetPrimVar() only for candidates that actually
-   * fail conservative-to-primitive conversion.
+   * Keep the established steady NEMO implicit path unchanged.
    *
-   * Do not run Mutation++ conservative-to-primitive inversion for every
-   * grid point here: that serial all-point preflight dominates runtime
-   * for AIR-7/AIR-11 and duplicates SetPrimVar() recovery.
+   * The additional thermochemical trial inversion below is deliberately
+   * restricted to physical-time calculations because Mutation++ trial
+   * inversions are substantially more expensive than the ordinary
+   * algebraic MAX_UPDATE_FLOW limiter.
    */
-  CompleteImplicitIteration_impl<true>(geometry, config);
+  if (!config->GetTime_Domain()) {
+    CompleteImplicitIteration_impl<true>(geometry, config);
+    return;
+  }
+
+  /*
+   * First compute SU2/NEMO's inexpensive conservative update limit.
+   *
+   * This controls the aggregate species-density and rhoE update and
+   * provides the initial point-local alpha used by the thermochemical
+   * admissibility test below.
+   */
+  ComputeUnderRelaxationFactor(config);
+
+  /*
+   * Physical-time NEMO thermochemical admissibility preflight.
+   *
+   * At extreme Mach number, rhoE is dominated by kinetic energy.
+   * Consequently, a small relative change of rhoE can still move the
+   * translational internal-energy state outside the admissible
+   * Mutation++ two-temperature manifold.
+   *
+   * Test
+   *
+   *   U_trial = U + alpha * DeltaU
+   *
+   * before the conservative update is committed.  If Mutation++ cannot
+   * recover finite positive T and Tve, ComputeAdmissibleImplicitStep()
+   * halves alpha until the candidate becomes admissible.
+   *
+   * CMutationTCLib owns mutable thermochemical mixture state, therefore
+   * these trial inversions are placed in SU2's safe global-access region.
+   */
+  BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
+
+  unsigned long limited_points = 0;
+  unsigned long failed_points = 0;
+
+  su2double min_alpha = 1.0;
+
+  for (unsigned long iPoint = 0;
+       iPoint < nPointDomain;
+       ++iPoint) {
+
+    const su2double initial_alpha =
+        nodes->GetUnderRelaxation(iPoint);
+
+    if (initial_alpha <= 0.0) {
+
+      nodes->SetUnderRelaxation(iPoint, 0.0);
+
+      ++failed_points;
+      min_alpha = 0.0;
+
+      continue;
+    }
+
+    /*
+     * Test initial_alpha first, followed by binary backtracking.
+     *
+     * 24 halvings allow recovery down to approximately 6e-8 of the
+     * original update while still preventing an invalid conservative
+     * state from being committed.
+     */
+    const su2double accepted_alpha =
+        nodes->ComputeAdmissibleImplicitStep(
+            iPoint,
+            &LinSysSol[iPoint*nVar],
+            initial_alpha,
+            FluidModel,
+            24);
+
+    nodes->SetUnderRelaxation(
+        iPoint,
+        accepted_alpha);
+
+    if (accepted_alpha < initial_alpha) {
+
+      ++limited_points;
+
+      min_alpha =
+          min(min_alpha, accepted_alpha);
+    }
+
+    if (accepted_alpha <= 0.0) {
+
+      ++failed_points;
+      min_alpha = 0.0;
+    }
+  }
+
+  if ((limited_points > 0) ||
+      (failed_points > 0)) {
+
+    cout
+        << "[NEMO_TRANSIENT_THERMO_LIMITER]"
+        << " limited_points=" << limited_points
+        << " min_alpha=" << min_alpha
+        << " failed_points=" << failed_points
+        << endl;
+  }
+
+  END_SU2_OMP_SAFE_GLOBAL_ACCESS
+
+  /*
+   * We have already computed and refined every point-local
+   * under-relaxation factor.  Therefore the generic implicit completion
+   * must not recompute them.
+   *
+   * It remains responsible for applying alpha*DeltaU, communication,
+   * periodic synchronization and verification.
+   */
+  CompleteImplicitIteration_impl<false>(
+      geometry,
+      config);
 }
 
 void CNEMOEulerSolver::ComputeUnderRelaxationFactor(const CConfig *config) {

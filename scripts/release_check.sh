@@ -25,7 +25,7 @@ test -f subprojects/Mutationpp/data/mixtures/air_5.xml
 test -f subprojects/Mutationpp/data/mixtures/air_7.xml
 test -f subprojects/Mutationpp/data/mixtures/air_11.xml
 
-if grep -RInE   'REPLACE_ME|YOUR_GITHUB_EMAIL|PUT_THE_EXACT_EMAIL_HERE'   scripts install_su2_nemo.sh update_su2_nemo.sh SU2_NEMO_INSTALL.md
+if grep -InE   'REPLACE_ME|YOUR_GITHUB_EMAIL|PUT_THE_EXACT_EMAIL_HERE'   scripts/install.sh   scripts/update.sh   scripts/doctor.sh   install_su2_nemo.sh   update_su2_nemo.sh   SU2_NEMO_INSTALL.md
 then
   echo "ERROR: release placeholder found" >&2
   exit 11

@@ -51,7 +51,22 @@ echo "MUTATIONPP_SUBMODULE_METADATA=PASS"
 require_file validation_checkpoints/final_patches/NEMO_EXTREME_MACH_PERMANENT_IMPLEMENTATION_REPORT.md
 echo "IMPLEMENTATION_REPORT=PASS"
 
-if git -C subprojects/Mutationpp rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+MPP_STATUS="$(git submodule status -- subprojects/Mutationpp)"
+MPP_STATE="${MPP_STATUS:0:1}"
+
+if [[ "$MPP_STATE" == "-" ]]; then
+  echo "MUTATIONPP_INITIALIZED_DATA=SKIP_NOT_INITIALIZED"
+else
+  MPP_HEAD="$(git -C subprojects/Mutationpp rev-parse HEAD)"
+  echo "MUTATIONPP_HEAD=$MPP_HEAD"
+
+  [[ "$MPP_HEAD" == "$MPP_GITLINK" ]] || {
+    echo "ERROR: initialized Mutation++ commit does not match pinned gitlink" >&2
+    echo "PINNED=$MPP_GITLINK" >&2
+    echo "ACTUAL=$MPP_HEAD" >&2
+    exit 14
+  }
+
   require_file subprojects/Mutationpp/data/mixtures/air_5.xml
   require_file subprojects/Mutationpp/data/mixtures/air_7.xml
   require_file subprojects/Mutationpp/data/mixtures/air_11.xml
@@ -59,8 +74,6 @@ if git -C subprojects/Mutationpp rev-parse --is-inside-work-tree >/dev/null 2>&1
   require_file subprojects/Mutationpp/data/mechanisms/air7_Park.xml
   require_file subprojects/Mutationpp/data/mechanisms/air11_Park.xml
   echo "MUTATIONPP_INITIALIZED_DATA=PASS"
-else
-  echo "MUTATIONPP_INITIALIZED_DATA=SKIP_NOT_INITIALIZED"
 fi
 
 if grep -InE   'REPLACE_ME|YOUR_GITHUB_EMAIL|PUT_THE_EXACT_EMAIL_HERE'   scripts/install.sh   scripts/update.sh   scripts/doctor.sh   install_su2_nemo.sh   update_su2_nemo.sh   SU2_NEMO_INSTALL.md

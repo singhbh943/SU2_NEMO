@@ -8,4 +8,4 @@ import shutil
 if __name__ == "__main__":
     src = os.path.abspath(sys.argv[1])
     dst = os.path.abspath(sys.argv[2])
-    shutil.copytree(src, dst)
+    shutil.copytree(src, dst, dirs_exist_ok=True)

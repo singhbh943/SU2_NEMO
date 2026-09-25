@@ -1,169 +1,138 @@
-# SU2-NEMO Production Solver
+# Unified SU2 8.5 + NEMO + Mutation++ + PATO
 
-Production-hardened SU2 NEMO with Mutation++ support for thermochemical nonequilibrium, ionized air mixtures, catalytic-wall physics, implicit thermochemistry, and extreme-Mach robustness.
+This repository extends SU2 8.5.0 "Harrier" in the normal SU2 source/install layout. It does not create a separate parallel SU2-NEMO product tree.
 
-This repository is an independently maintained SU2-derived implementation. It is not the upstream SU2 project. Upstream SU2 project information and license files are retained in this repository.
+The intended layout is:
 
-## Validated production coverage
+```text
+~/SU2/
+├── SU2/          # source checkout
+└── SU2_install/  # one installed prefix
+```
 
-The v0.1.0 implementation includes:
+The single installation contains standard SU2, the hardened NEMO/Mutation++ implementation, PySU2, NASA PATO, and the validated SU2↔PATO coupling launchers.
 
-- AIR-5, AIR-7, and AIR-11 Mutation++ mixtures and mechanisms.
-- Two-temperature NEMO thermochemical nonequilibrium.
-- Ionization and finite-rate chemistry.
-- Explicit and implicit integration.
-- Non-catalytic, catalytic, and supercatalytic wall paths.
-- Accepted-state recovery and thermochemical admissibility/backtracking.
-- Implicit chemistry and vibrational/electronic-energy Jacobians.
-- AIR-11 pressure-derivative support.
-- Ambipolar Stefan-Maxwell diffusion.
-- Thread-safe Mutation++ transport.
-- Eigen DSO symbol isolation for Mutation++.
-- Exact catalytic species-flux heat reporting.
-- Transient thermochemical admissibility limiting.
-- AIR-11 supercatalytic N/O elemental conservation and zero net charge-flux enforcement.
-- PySU2 support built from the same source tree.
+## Included capability
 
-For Mutation++ NEMO production cases, use:
+- Standard SU2 executables: SU2_CFD, SU2_DEF, SU2_DOT, SU2_GEO, SU2_SOL.
+- AIR-5, AIR-7 and AIR-11 NEMO/Mutation++ support.
+- Explicit and implicit thermochemical nonequilibrium.
+- Catalytic and supercatalytic wall hardening.
+- AIR-11 pressure/Jacobian and elemental/charge closure corrections.
+- Ambipolar Stefan-Maxwell transport.
+- PySU2 built and installed with the same SU2 source.
+- PATO 3.1 pinned as `externals/PATO`.
+- Isolated OpenFOAM-7/foam-extend PATO environment.
+- Persistent SU2↔PATO heat-flux / wall-temperature coupling.
+
+For Mutation++ NEMO production cases use:
 
 ```text
 REF_DIMENSIONALIZATION= DIMENSIONAL
 ```
 
-## Source installation
+## Recommended fresh install
 
-On Ubuntu, clone the release and build the complete solver stack:
+Miniconda is required for the PATO toolchain. With Miniconda available under `~/miniconda3`:
 
 ```bash
-git clone --branch v0.1.0 --recursive \
-  https://github.com/singhbh943/SU2_NEMO.git
+mkdir -p "$HOME/SU2"
 
-cd SU2_NEMO
+git clone --branch su2-nemo-installable-v0.1.0 --recursive \
+  https://github.com/singhbh943/SU2_NEMO.git \
+  "$HOME/SU2/SU2"
+
+cd "$HOME/SU2/SU2"
 
 ./scripts/install.sh \
-  --prefix "$HOME/SU2_NEMO" \
-  --install-deps
+  --prefix "$HOME/SU2/SU2_install" \
+  --install-deps \
+  --install-pato-env \
+  --persist-shell
 ```
 
-If the required compiler, CMake, Ninja, OpenMPI, and other dependencies are already installed, omit `--install-deps`:
+After the v0.1.0 tag is published, replace the branch name above with `v0.1.0`.
 
-```bash
-./scripts/install.sh \
-  --prefix "$HOME/SU2_NEMO" \
-  --jobs "$(nproc)"
-```
-
-The installer initializes the pinned Mutation++ submodule, configures SU2 with Mutation++ and PySU2 enabled, builds the source tree, constructs a relocatable runtime, records provenance, and verifies the installation.
-
-## Verify the installation
-
-```bash
-./scripts/doctor.sh --prefix "$HOME/SU2_NEMO"
-```
-
-A successful installation reports:
+The installer builds SU2 with:
 
 ```text
-SU2_NEMO_DOCTOR=PASS
+enable-mpp=true
+install-mpp=true
+enable-pywrapper=true
 ```
 
-The installed solver is available at:
+and builds PATO in the pinned isolated OpenFOAM-7 environment.
+
+## Installed commands
 
 ```text
-$HOME/SU2_NEMO/bin/SU2_CFD
+~/SU2/SU2_install/bin/SU2_CFD
+~/SU2/SU2_install/bin/SU2_DEF
+~/SU2/SU2_install/bin/SU2_DOT
+~/SU2/SU2_install/bin/SU2_GEO
+~/SU2/SU2_install/bin/SU2_SOL
+~/SU2/SU2_install/bin/su2-nemo-python
+~/SU2/SU2_install/bin/PATOx
+~/SU2/SU2_install/bin/su2-pato
 ```
 
-Add it to your shell path:
+Normal SU2 runs use:
 
 ```bash
-export PATH="$HOME/SU2_NEMO/bin:$PATH"
-```
-
-Then run a case normally:
-
-```bash
+source "$HOME/SU2/SU2_install/etc/su2/activate.sh"
 SU2_CFD case.cfg
 ```
 
-## PySU2
+PATO is deliberately activated only when `PATOx` or `su2-pato` is invoked so its OpenFOAM/compiler/MPI environment does not contaminate normal SU2 runs.
 
-The installer also builds and packages PySU2:
-
-```bash
-"$HOME/SU2_NEMO/bin/su2-nemo-python" your_script.py
-```
-
-or activate the runtime environment:
+## Verify
 
 ```bash
-source "$HOME/SU2_NEMO/runtime/su2_nemo_env.sh"
+cd "$HOME/SU2/SU2"
+./scripts/doctor.sh --prefix "$HOME/SU2/SU2_install"
 ```
 
-## Updating an installation
-
-From a source checkout:
-
-```bash
-./scripts/update.sh --prefix "$HOME/SU2_NEMO"
-```
-
-The update path requires a clean tracked source tree and uses a fast-forward-only update.
-
-## Portable Linux runtime
-
-A verified source build can generate a portable Linux x86_64 runtime:
-
-```bash
-./make_su2_nemo_tarball.sh
-```
-
-The portable runtime includes the SU2_CFD executable, the required Mutation++ shared library and data, PySU2 runtime files, examples, provenance metadata, checksums, and verification tooling. Compatibility with the target system libraries, including glibc and OpenMPI, is still required.
-
-## Release validation
-
-The v0.1.0 installation workflow was validated from a fresh public GitHub clone into an independent installation prefix. The release gate verified:
-
-- a fresh source build;
-- pinned Mutation++ submodule provenance;
-- SU2_CFD runtime linkage to the packaged Mutation++ library;
-- PySU2 import from the installed runtime;
-- AIR-5, AIR-7, and AIR-11 mixture/mechanism data;
-- runtime SHA-256 manifest integrity;
-- clean Mutation++ library packaging;
-- installation provenance; and
-- the complete `doctor.sh` verification path.
-
-The validation establishes reproducibility of the software installation/runtime path. It does not by itself establish physical validation for every geometry, flow condition, material model, or numerical configuration.
-
-## Implementation record
-
-The permanent implementation report and patch records are stored under:
+A complete installation reports:
 
 ```text
-validation_checkpoints/final_patches/
+SU2_UNIFIED_DOCTOR=PASS
+SU2_STANDARD=PASS
+SU2_NEMO=PASS
+MUTATIONPP=PASS
+PYSU2=PASS
+PATO=PASS
+SU2_PATO_COUPLING=PASS
 ```
 
-In particular:
+## Update
+
+```bash
+cd "$HOME/SU2/SU2"
+./scripts/update.sh --prefix "$HOME/SU2/SU2_install"
+```
+
+## Coupling
+
+The installed coupling command is:
+
+```bash
+su2-pato --su2-case /path/to/su2/case --pato-case /path/to/pato/case
+```
+
+The current persistent driver is the validated AIR11 interface implementation and includes case-specific interface cardinalities (139 SU2 wall vertices and 138 PATO faces). Validate geometry, ordering, heat-flux sign, scaling, and material timestep before production use.
+
+## Provenance
+
+The installer writes:
 
 ```text
-validation_checkpoints/final_patches/
-NEMO_EXTREME_MACH_PERMANENT_IMPLEMENTATION_REPORT.md
+~/SU2/SU2_install/UNIFIED_INSTALLATION
 ```
 
-documents the hardened NEMO/Mutation++ implementation.
+with SU2, Mutation++, and PATO commits plus build/install ELF identifiers.
 
-## Upstream projects and licensing
+## Licensing and attribution
 
-This repository is derived from SU2 and uses Mutation++ as a pinned submodule. Preserve the license and attribution files shipped with both projects.
+This is an SU2-derived source tree. Preserve the existing SU2 license and attribution files. Mutation++ and PATO are pinned submodules and retain their own license/legal materials. See `THIRD_PARTY_NOTICES.md`.
 
-- SU2 license texts are retained in `COPYING` and `LICENSE.md`.
-- Mutation++ license text is retained by the pinned submodule and copied into the packaged runtime documentation.
-- See `THIRD_PARTY_NOTICES.md` for the release-specific notice, including a metadata inconsistency observed in the pinned Mutation++ revision.
-
-## Citation
-
-See `CITATION.cff` for this release. When publishing results, also cite the relevant upstream SU2 and Mutation++ publications.
-
-## Repository
-
-https://github.com/singhbh943/SU2_NEMO
+The installation validation establishes software/build/runtime reproducibility. It does not by itself validate every physical configuration.

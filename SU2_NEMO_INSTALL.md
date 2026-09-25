@@ -1,135 +1,106 @@
-# SU2-NEMO Installation
+# Unified SU2-NEMO-PATO Installation
 
-This document describes the supported v0.1.0 installation and runtime workflow.
+The supported installation follows the normal SU2 source + install-prefix structure:
 
-## Requirements
-
-The source installer is intended for a compatible Linux system. The Ubuntu dependency helper installs the build tools used by the validated release:
-
-```bash
-./install_dependencies_ubuntu.sh
+```text
+~/SU2/SU2          source tree
+~/SU2/SU2_install  installed tree
 ```
 
-The dependency set includes a C/C++ toolchain, Git, Python 3, CMake, Ninja, OpenMPI development/runtime packages, zlib development files, curl, and CA certificates.
+NEMO is part of the installed `SU2_CFD`; it is not installed as a second independent SU2 tree.
 
-## Fresh source installation
+## Fresh install
 
-Clone the release:
-
-```bash
-git clone --branch v0.1.0 --recursive \
-  https://github.com/singhbh943/SU2_NEMO.git
-
-cd SU2_NEMO
-```
-
-Install everything under a dedicated prefix:
+Prerequisite: Miniconda/Conda is available. The validated setup uses `~/miniconda3`.
 
 ```bash
+mkdir -p "$HOME/SU2"
+git clone --branch su2-nemo-installable-v0.1.0 --recursive \
+  https://github.com/singhbh943/SU2_NEMO.git \
+  "$HOME/SU2/SU2"
+
+cd "$HOME/SU2/SU2"
+
 ./scripts/install.sh \
-  --prefix "$HOME/SU2_NEMO" \
-  --install-deps
+  --prefix "$HOME/SU2/SU2_install" \
+  --install-deps \
+  --install-pato-env \
+  --persist-shell
 ```
 
-If dependencies are already present:
+If system dependencies and the pinned PATO Conda environment already exist:
 
 ```bash
-./scripts/install.sh \
-  --prefix "$HOME/SU2_NEMO" \
-  --jobs "$(nproc)"
+./scripts/install.sh --prefix "$HOME/SU2/SU2_install" --jobs "$(nproc)"
 ```
 
-The installer performs the following permanent steps:
+## What the installer does
 
-1. verifies the source checkout;
-2. initializes the pinned Mutation++ submodule;
-3. configures Meson with `enable-mpp=true` and `enable-pywrapper=true`;
-4. builds SU2_CFD, Mutation++, and PySU2;
-5. constructs the runtime under `<prefix>/runtime`;
-6. installs Mutation++ data and the required shared library;
-7. packages PySU2 and creates `su2-nemo-python`;
-8. regenerates the final SHA-256 runtime manifest;
-9. verifies the source and runtime; and
-10. creates stable `current` and `bin` links.
+1. Initializes all pinned submodules recursively.
+2. Verifies or creates the PATO 3.1 Conda environment when requested.
+3. Configures SU2 8.5 with Mutation++, Mutation++ installation, and PySU2.
+4. Builds and installs the normal SU2 executables into `SU2_install/bin`.
+5. Installs `libmutation__.so` and AIR-5/AIR-7/AIR-11 data into the same prefix.
+6. Creates an NEMO-aware `SU2_CFD` launcher while preserving the installed ELF as `SU2_CFD.real`.
+7. Builds PATO in the isolated OpenFOAM-7/foam-extend environment.
+8. Copies the PATO runtime/source support tree into `SU2_install/share/PATO`.
+9. Installs the validated persistent SU2-PATO coupling under `SU2_install/share/su2-pato`.
+10. Creates `PATOx`, `su2-pato`, and `su2-nemo-python` launchers.
+11. Writes installation provenance and runs the unified doctor.
 
 ## Verify
 
-Run:
-
 ```bash
-./scripts/doctor.sh --prefix "$HOME/SU2_NEMO"
+./scripts/doctor.sh --prefix "$HOME/SU2/SU2_install"
 ```
 
-The expected final marker is:
-
-```text
-SU2_NEMO_DOCTOR=PASS
-```
-
-## Run SU2_CFD
+## Normal SU2/NEMO
 
 ```bash
-export PATH="$HOME/SU2_NEMO/bin:$PATH"
+source "$HOME/SU2/SU2_install/etc/su2/activate.sh"
 SU2_CFD case.cfg
 ```
 
-For Mutation++ NEMO production cases:
+For Mutation++ NEMO cases:
 
 ```text
 REF_DIMENSIONALIZATION= DIMENSIONAL
 ```
 
-## Run PySU2
+## PySU2
 
 ```bash
-"$HOME/SU2_NEMO/bin/su2-nemo-python" your_script.py
+su2-nemo-python your_script.py
 ```
 
-The wrapper configures the packaged Python, Mutation++ data, Mutation++ shared-library path, and OpenMPI OSC setting.
+## PATO
+
+```bash
+PATOx
+```
+
+The launcher activates the pinned PATO Conda/OpenFOAM-7 environment only for PATO execution.
+
+## Persistent two-way coupling
+
+```bash
+su2-pato \
+  --su2-case /path/to/su2/case \
+  --pato-case /path/to/pato/case
+```
+
+The current validated persistent driver is case-specific to the AIR11 interface used during development: 139 SU2 wall vertices and 138 PATO faces. Its default `Q_SCALE` and `PATO_DT` are software-validation defaults, not general production values.
 
 ## Update
 
-From the checked-out source tree:
-
 ```bash
-./scripts/update.sh --prefix "$HOME/SU2_NEMO"
+./scripts/update.sh --prefix "$HOME/SU2/SU2_install"
 ```
 
-The updater refuses tracked local modifications and uses a fast-forward-only Git update before rebuilding/revalidating.
-
-## Release/source verification
-
-Before packaging or publishing a source state:
+## Release check
 
 ```bash
 ./scripts/release_check.sh
 ```
 
-The check validates script syntax, NEMO source markers, the Mutation++ submodule gitlink and repository metadata, implementation-report presence, release placeholders, and—when initialized—the pinned Mutation++ revision and AIR-5/AIR-7/AIR-11 data.
-
-## Portable runtime
-
-After a verified source build:
-
-```bash
-./make_su2_nemo_tarball.sh
-```
-
-The resulting Linux x86_64 package can be verified with:
-
-```bash
-./verify_runtime.sh
-```
-
-A portable binary runtime still depends on compatible host system libraries such as glibc and OpenMPI.
-
-## Compatibility entry points
-
-The historical top-level commands remain as compatibility wrappers:
-
-```bash
-./install_su2_nemo.sh
-./update_su2_nemo.sh
-```
-
-New usage should prefer `scripts/install.sh`, `scripts/update.sh`, and `scripts/doctor.sh`.
+The release check verifies NEMO source markers, both pinned gitlinks, persistent coupling files, and shell/Python syntax.

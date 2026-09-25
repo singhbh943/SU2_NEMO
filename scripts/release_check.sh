@@ -21,6 +21,9 @@ python3 -m py_compile   coupling/SU2_PATO/runtime/run_persistent_coupling.py   c
 
 echo "SCRIPT_AND_PYTHON_SYNTAX=PASS"
 
+require_grep 'dirs_exist_ok=True' SU2_PY/copy_directory.py
+echo "IDEMPOTENT_INSTALL_DATA_COPY=PASS"
+
 require_grep 'CMutationTCLib::ComputedPdU' SU2_CFD/src/fluid/CMutationTCLib.cpp
 require_grep 'ComputeStefanMaxwellDiffusionVelocities' SU2_CFD/src/fluid/CMutationTCLib.cpp
 require_grep 'GetEveSourceTermJacobian' SU2_CFD/src/fluid/CMutationTCLib.cpp

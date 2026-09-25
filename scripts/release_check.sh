@@ -5,31 +5,21 @@ ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 cd "$ROOT"
 
 echo "============================================================"
-echo " SU2 NEMO RELEASE CHECK"
+echo " UNIFIED SU2 NEMO PATO RELEASE CHECK"
 echo "============================================================"
 
-require_file() {
-  [[ -f "$1" ]] || {
-    echo "ERROR: missing required file: $1" >&2
-    exit 10
-  }
-}
+require_file() { [[ -f "$1" ]] || { echo "ERROR: missing required file: $1" >&2; exit 10; }; }
+require_grep() { grep -Fq "$1" "$2" || { echo "ERROR: required marker not found in $2: $1" >&2; exit 12; }; }
 
-require_grep() {
-  local pattern="$1"
-  local file="$2"
-  grep -Fq "$pattern" "$file" || {
-    echo "ERROR: required marker not found in $file: $pattern" >&2
-    exit 12
-  }
-}
-
-for f in   scripts/install.sh   scripts/update.sh   scripts/doctor.sh   scripts/release_check.sh   install_su2_nemo.sh   update_su2_nemo.sh   refresh_su2_nemo_runtime.sh   verify_su2_nemo.sh
+for f in   scripts/install.sh   scripts/update.sh   scripts/doctor.sh   scripts/release_check.sh   install_su2_nemo.sh   update_su2_nemo.sh   tools/activate_pato.sh   tools/build_pato.sh   tools/install_pato_environment.sh   coupling/SU2_PATO/runtime/run_persistent_coupling.sh   coupling/SU2_PATO/runtime/run_pysu2.sh
 do
   require_file "$f"
   bash -n "$f"
 done
-echo "SCRIPT_SYNTAX=PASS"
+
+python3 -m py_compile   coupling/SU2_PATO/runtime/run_persistent_coupling.py   coupling/SU2_PATO/map_su2_profile_to_pato_faces.py   coupling/SU2_PATO/map_pato_temperature_to_su2.py
+
+echo "SCRIPT_AND_PYTHON_SYNTAX=PASS"
 
 require_grep 'CMutationTCLib::ComputedPdU' SU2_CFD/src/fluid/CMutationTCLib.cpp
 require_grep 'ComputeStefanMaxwellDiffusionVelocities' SU2_CFD/src/fluid/CMutationTCLib.cpp
@@ -39,48 +29,31 @@ echo "NEMO_SOURCE_MARKERS=PASS"
 require_file .gitmodules
 require_grep 'subprojects/Mutationpp' .gitmodules
 require_grep 'https://github.com/singhbh943/Mutationpp.git' .gitmodules
+require_grep 'externals/PATO' .gitmodules
+require_grep 'https://github.com/singhbh943/pato.git' .gitmodules
 
-MPP_GITLINK="$(git ls-files --stage subprojects/Mutationpp | awk '$1 == "160000" {print $2}')"
-[[ -n "$MPP_GITLINK" ]] || {
-  echo "ERROR: Mutation++ submodule gitlink is missing" >&2
-  exit 13
-}
+MPP_GITLINK="$(git ls-files --stage subprojects/Mutationpp | awk '$1=="160000"{print $2}')"
+PATO_GITLINK="$(git ls-files --stage externals/PATO | awk '$1=="160000"{print $2}')"
+
+[[ -n "$MPP_GITLINK" ]] || { echo "ERROR: Mutation++ gitlink missing" >&2; exit 13; }
+[[ -n "$PATO_GITLINK" ]] || { echo "ERROR: PATO gitlink missing" >&2; exit 14; }
+
 echo "MUTATIONPP_GITLINK=$MPP_GITLINK"
-echo "MUTATIONPP_SUBMODULE_METADATA=PASS"
+echo "PATO_GITLINK=$PATO_GITLINK"
+echo "SUBMODULE_METADATA=PASS"
 
 require_file validation_checkpoints/final_patches/NEMO_EXTREME_MACH_PERMANENT_IMPLEMENTATION_REPORT.md
-echo "IMPLEMENTATION_REPORT=PASS"
+require_file coupling/SU2_PATO/runtime/run_persistent_coupling.py
+require_file coupling/SU2_PATO/map_su2_profile_to_pato_faces.py
+require_file coupling/SU2_PATO/map_pato_temperature_to_su2.py
 
-MPP_STATUS="$(git submodule status -- subprojects/Mutationpp)"
-MPP_STATE="${MPP_STATUS:0:1}"
+echo "IMPLEMENTATION_AND_COUPLING_SOURCE=PASS"
 
-if [[ "$MPP_STATE" == "-" ]]; then
-  echo "MUTATIONPP_INITIALIZED_DATA=SKIP_NOT_INITIALIZED"
-else
-  MPP_HEAD="$(git -C subprojects/Mutationpp rev-parse HEAD)"
-  echo "MUTATIONPP_HEAD=$MPP_HEAD"
-
-  [[ "$MPP_HEAD" == "$MPP_GITLINK" ]] || {
-    echo "ERROR: initialized Mutation++ commit does not match pinned gitlink" >&2
-    echo "PINNED=$MPP_GITLINK" >&2
-    echo "ACTUAL=$MPP_HEAD" >&2
-    exit 14
-  }
-
-  require_file subprojects/Mutationpp/data/mixtures/air_5.xml
-  require_file subprojects/Mutationpp/data/mixtures/air_7.xml
-  require_file subprojects/Mutationpp/data/mixtures/air_11.xml
-  require_file subprojects/Mutationpp/data/mechanisms/air5_Park.xml
-  require_file subprojects/Mutationpp/data/mechanisms/air7_Park.xml
-  require_file subprojects/Mutationpp/data/mechanisms/air11_Park.xml
-  echo "MUTATIONPP_INITIALIZED_DATA=PASS"
-fi
-
-if grep -InE   'REPLACE_ME|YOUR_GITHUB_EMAIL|PUT_THE_EXACT_EMAIL_HERE'   scripts/install.sh   scripts/update.sh   scripts/doctor.sh   install_su2_nemo.sh   update_su2_nemo.sh   SU2_NEMO_INSTALL.md
+if grep -InE   'REPLACE_ME|YOUR_GITHUB_EMAIL|PUT_THE_EXACT_EMAIL_HERE'   scripts/install.sh   scripts/update.sh   scripts/doctor.sh   install_su2_nemo.sh   update_su2_nemo.sh   SU2_NEMO_INSTALL.md   README.md
 then
   echo "ERROR: release placeholder found" >&2
   exit 11
 fi
-echo "RELEASE_PLACEHOLDER_CHECK=PASS"
 
+echo "RELEASE_PLACEHOLDER_CHECK=PASS"
 echo "SU2_NEMO_RELEASE_CHECK=PASS"

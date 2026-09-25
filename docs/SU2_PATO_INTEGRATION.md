@@ -5,6 +5,7 @@
 - Upstream release: PATO 3.1
 - Upstream base commit: `33d895885ceb1b61e71e2d2f2cf5327339205570`
 - Integration patch commit: `9fa38452230ae0e9cd45a5e07ef1b145a1cb2c18`
+- Current post-release PATO pin: `7a19ba8b3ae1768cb7f21833ef6188bb34b39fe5`
 - Integration branch: `su2-nemo-pato-3.1-compat`
 - Fork: `https://github.com/singhbh943/pato.git`
 

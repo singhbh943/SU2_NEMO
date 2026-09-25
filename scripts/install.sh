@@ -2,22 +2,32 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-PREFIX="${SU2_NEMO_PREFIX:-$HOME/SU2_NEMO}"
+DEFAULT_PREFIX="$(cd "$ROOT/.." && pwd)/SU2_install"
+PREFIX="${SU2_INSTALL_PREFIX:-$DEFAULT_PREFIX}"
 JOBS="$(nproc)"
 INSTALL_DEPS=0
+INSTALL_PATO_ENV=0
 CLEAN_BUILD=0
+PERSIST_SHELL=0
+SKIP_PATO_BUILD=0
 
 usage() {
   cat <<'USAGE'
 Usage:
-  ./scripts/install.sh [--prefix PATH] [--jobs N] [--install-deps] [--clean-build]
+  ./scripts/install.sh [options]
+
+Installs standard SU2 + NEMO + Mutation++ + PySU2 + PATO + SU2-PATO
+into one official-style SU2 installation prefix.
 
 Options:
-  --prefix PATH     Installation prefix. Default: $HOME/SU2_NEMO
-  --jobs N          Parallel build jobs. Default: nproc
-  --install-deps    Install Ubuntu build dependencies first.
-  --clean-build     Remove the existing Meson build directory before configuring.
-  -h, --help        Show this help.
+  --prefix PATH          Install prefix. Default: sibling SU2_install directory.
+  --jobs N               Parallel build jobs. Default: nproc.
+  --install-deps         Install Ubuntu SU2 build dependencies.
+  --install-pato-env     Create/update the pinned PATO 3.1 Conda environment.
+  --skip-pato-build      Reuse an already-built PATO submodule.
+  --clean-build          Remove the SU2 Meson build directory before configure.
+  --persist-shell        Add the unified SU2 activation to ~/.bashrc.
+  -h, --help             Show this help.
 USAGE
 }
 
@@ -26,7 +36,10 @@ while [[ $# -gt 0 ]]; do
     --prefix) PREFIX="${2:-}"; shift 2 ;;
     --jobs) JOBS="${2:-}"; shift 2 ;;
     --install-deps) INSTALL_DEPS=1; shift ;;
+    --install-pato-env) INSTALL_PATO_ENV=1; shift ;;
+    --skip-pato-build) SKIP_PATO_BUILD=1; shift ;;
     --clean-build) CLEAN_BUILD=1; shift ;;
+    --persist-shell) PERSIST_SHELL=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -42,16 +55,22 @@ print(Path(sys.argv[1]).expanduser().resolve())
 PY
 )"
 
+PATO="$ROOT/externals/PATO"
+COUPLING="$ROOT/coupling/SU2_PATO"
+CONDA_BASE="${SU2_PATO_CONDA_BASE:-$HOME/miniconda3}"
+PATO_ENV="${SU2_PATO_CONDA_ENV:-su2-nemo-pato}"
+PYTHON_BIN="$(command -v python3)"
+
 echo "============================================================"
-echo " SU2 NEMO SOURCE INSTALL"
+echo " UNIFIED SU2 + NEMO + MUTATION++ + PATO INSTALL"
 echo "============================================================"
 echo "SOURCE=$ROOT"
 echo "PREFIX=$PREFIX"
 echo "JOBS=$JOBS"
 
 git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null
-if ! git -C "$ROOT" diff --quiet || ! git -C "$ROOT" diff --cached --quiet; then
-  echo "ERROR: tracked source changes exist; commit or revert them before installation." >&2
+if ! git -C "$ROOT" diff --ignore-submodules=dirty --quiet || ! git -C "$ROOT" diff --cached --ignore-submodules=dirty --quiet; then
+  echo "ERROR: tracked SU2 source changes exist; commit or revert them before installation." >&2
   git -C "$ROOT" status --short
   exit 10
 fi
@@ -60,10 +79,9 @@ if [[ $INSTALL_DEPS -eq 1 ]]; then
   "$ROOT/install_dependencies_ubuntu.sh"
 fi
 
-for cmd in git python3 cmake ninja mpicxx; do
+for cmd in git python3 cmake ninja mpicxx tar ldd readelf; do
   command -v "$cmd" >/dev/null 2>&1 || {
     echo "ERROR: required command not found: $cmd" >&2
-    echo "Run: ./scripts/install.sh --install-deps" >&2
     exit 11
   }
 done
@@ -72,112 +90,298 @@ echo
 echo "===== SUBMODULES ====="
 git -C "$ROOT" submodule sync --recursive
 git -C "$ROOT" submodule update --init --recursive
-git -C "$ROOT/subprojects/Mutationpp" rev-parse --is-inside-work-tree >/dev/null
+[[ -d "$ROOT/subprojects/Mutationpp" ]] || { echo "ERROR: Mutation++ submodule missing" >&2; exit 12; }
+[[ -d "$PATO" ]] || { echo "ERROR: PATO submodule missing" >&2; exit 13; }
+
+MPP_COMMIT="$(git -C "$ROOT/subprojects/Mutationpp" rev-parse HEAD)"
+PATO_COMMIT="$(git -C "$PATO" rev-parse HEAD)"
+echo "MUTATIONPP_COMMIT=$MPP_COMMIT"
+echo "PATO_COMMIT=$PATO_COMMIT"
+
+if [[ $INSTALL_PATO_ENV -eq 1 ]]; then
+  [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]] || {
+    echo "ERROR: Conda activation not found: $CONDA_BASE/etc/profile.d/conda.sh" >&2
+    exit 14
+  }
+  "$ROOT/tools/install_pato_environment.sh"
+else
+  [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]] || {
+    echo "ERROR: PATO requires Conda at $CONDA_BASE." >&2
+    echo "Install Miniconda, then rerun with --install-pato-env." >&2
+    exit 14
+  }
+  set +u
+  source "$CONDA_BASE/etc/profile.d/conda.sh"
+  if ! conda env list | awk '{print $1}' | grep -Fxq "$PATO_ENV"; then
+    echo "ERROR: PATO environment '$PATO_ENV' is missing." >&2
+    echo "Rerun with --install-pato-env." >&2
+    exit 15
+  fi
+  set -u
+fi
 
 if [[ $CLEAN_BUILD -eq 1 ]]; then
   rm -rf "$ROOT/build"
 fi
 
 echo
-echo "===== CONFIGURE ====="
+echo "===== CONFIGURE SU2 ====="
 if [[ -d "$ROOT/build" ]]; then
-  python3 "$ROOT/meson.py" setup "$ROOT/build" --reconfigure     -Denable-mpp=true     -Denable-pywrapper=true
+  "$PYTHON_BIN" "$ROOT/meson.py" setup "$ROOT/build" --reconfigure --prefix "$PREFIX" -Denable-mpp=true -Dinstall-mpp=true -Denable-pywrapper=true
 else
-  python3 "$ROOT/meson.py" setup "$ROOT/build"     -Denable-mpp=true     -Denable-pywrapper=true
+  "$PYTHON_BIN" "$ROOT/meson.py" setup "$ROOT/build" --prefix "$PREFIX" -Denable-mpp=true -Dinstall-mpp=true -Denable-pywrapper=true
+fi
+
+if [[ -x "$ROOT/ninja" ]]; then
+  NINJA="$ROOT/ninja"
+else
+  NINJA="$(command -v ninja)"
 fi
 
 echo
-echo "===== BUILD SU2 NEMO + MUTATION++ + PYSU2 ====="
-ninja -C "$ROOT/build" -j"$JOBS"
-
-test -x "$ROOT/build/SU2_CFD/src/SU2_CFD"
+echo "===== BUILD SU2 + NEMO + MUTATION++ + PYSU2 ====="
+"$NINJA" -C "$ROOT/build" -j"$JOBS"
 
 echo
-echo "===== CREATE RUNTIME ====="
+echo "===== INSTALL NORMAL SU2 PREFIX ====="
 mkdir -p "$PREFIX"
-"$ROOT/refresh_su2_nemo_runtime.sh" "$PREFIX/runtime"
+"$NINJA" -C "$ROOT/build" install
 
-PYSU2_BUILD="$ROOT/build/SU2_PY/pySU2"
-if [[ ! -d "$PYSU2_BUILD" ]]; then
-  echo "ERROR: PySU2 build directory missing: $PYSU2_BUILD" >&2
-  exit 20
+for exe in SU2_CFD SU2_DEF SU2_DOT SU2_GEO SU2_SOL; do
+  [[ -x "$PREFIX/bin/$exe" ]] || { echo "ERROR: missing installed $exe" >&2; exit 20; }
+done
+
+MPP_LIB="$(find "$PREFIX/lib" -maxdepth 2 \( -type f -o -type l \) -name 'libmutation__.so' -print -quit)"
+[[ -n "$MPP_LIB" && -f "$MPP_LIB" ]] || { echo "ERROR: installed libmutation__.so not found" >&2; exit 21; }
+LIBDIR="$(dirname "$MPP_LIB")"
+
+if [[ ! -d "$PREFIX/mpp-data" ]]; then
+  cp -a "$ROOT/subprojects/Mutationpp/data" "$PREFIX/mpp-data"
 fi
+for f in mixtures/air_5.xml mixtures/air_7.xml mixtures/air_11.xml mechanisms/air5_Park.xml mechanisms/air7_Park.xml mechanisms/air11_Park.xml; do
+  [[ -f "$PREFIX/mpp-data/$f" ]] || { echo "ERROR: Mutation++ data missing: $f" >&2; exit 22; }
+done
 
-rm -rf "$PREFIX/runtime/python"
-mkdir -p "$PREFIX/runtime/python"
-cp -a "$PYSU2_BUILD"/. "$PREFIX/runtime/python/"
+mkdir -p "$PREFIX/share/mutationpp"
+rm -f "$PREFIX/share/mutationpp/data"
+ln -s "$PREFIX/mpp-data" "$PREFIX/share/mutationpp/data"
 
-cat > "$PREFIX/runtime/bin/su2-nemo-python" <<'PYWRAP'
+[[ -f "$PREFIX/bin/pysu2.py" && -f "$PREFIX/bin/_pysu2.so" ]] || {
+  echo "ERROR: installed PySU2 files missing" >&2
+  exit 23
+}
+
+echo
+echo "===== INSTALL NEMO RECORD ====="
+rm -rf "$PREFIX/share/su2-nemo"
+mkdir -p "$PREFIX/share/su2-nemo"
+cp -a "$ROOT/validation_checkpoints/final_patches" "$PREFIX/share/su2-nemo/"
+cp -a "$ROOT/SU2_NEMO_INSTALL.md" "$PREFIX/share/su2-nemo/"
+
+echo
+echo "===== CREATE NEMO-AWARE SU2_CFD LAUNCHER ====="
+rm -f "$PREFIX/bin/SU2_CFD.real"
+mv "$PREFIX/bin/SU2_CFD" "$PREFIX/bin/SU2_CFD.real"
+
+cat > "$PREFIX/bin/SU2_CFD" <<EOF
 #!/usr/bin/env bash
-set -euo pipefail
-SELF="$(readlink -f "$0")"
-ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
-export PYTHONPATH="$ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
-export MPP_DIRECTORY="$ROOT/share/mutationpp"
-export MPP_DATA_DIRECTORY="$ROOT/share/mutationpp/data"
-export LD_LIBRARY_PATH="$ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export OMPI_MCA_osc="${OMPI_MCA_osc:-pt2pt}"
-exec python3 "$@"
-PYWRAP
-chmod +x "$PREFIX/runtime/bin/su2-nemo-python"
+set -e
+export SU2_HOME="$ROOT"
+export SU2_RUN="$PREFIX/bin"
+export MPP_DIRECTORY="$PREFIX/share/mutationpp"
+export MPP_DATA_DIRECTORY="$PREFIX/mpp-data"
+export LD_LIBRARY_PATH="$LIBDIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+exec "$PREFIX/bin/SU2_CFD.real" "\$@"
+EOF
+chmod 0755 "$PREFIX/bin/SU2_CFD"
 
-cat >> "$PREFIX/runtime/su2_nemo_env.sh" <<'ENVADD'
+cat > "$PREFIX/bin/su2-nemo-python" <<EOF
+#!/usr/bin/env bash
+set -e
+export SU2_HOME="$ROOT"
+export SU2_RUN="$PREFIX/bin"
+export PYTHONPATH="$PREFIX/bin\${PYTHONPATH:+:\$PYTHONPATH}"
+export MPP_DIRECTORY="$PREFIX/share/mutationpp"
+export MPP_DATA_DIRECTORY="$PREFIX/mpp-data"
+export LD_LIBRARY_PATH="$LIBDIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+exec "$PYTHON_BIN" "\$@"
+EOF
+chmod 0755 "$PREFIX/bin/su2-nemo-python"
 
-# SU2_NEMO_PYTHON_RUNTIME
-if [ -d "$SU2_NEMO_ROOT/python" ]; then
-  export PYTHONPATH="$SU2_NEMO_ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
+if [[ $SKIP_PATO_BUILD -ne 1 ]]; then
+  echo
+  echo "===== BUILD PATO IN ISOLATED OPENFOAM-7 ENVIRONMENT ====="
+  "$ROOT/tools/build_pato.sh"
 fi
-ENVADD
+
+[[ -x "$PATO/install/bin/PATOx" ]] || { echo "ERROR: PATOx build missing" >&2; exit 30; }
+[[ -f "$PATO/install/lib/libPATOx.so" ]] || { echo "ERROR: libPATOx.so missing" >&2; exit 31; }
+[[ -f "$PATO/install/lib/libSamplingUser.so" ]] || { echo "ERROR: libSamplingUser.so missing" >&2; exit 32; }
 
 echo
-echo "===== FINALIZE RUNTIME MANIFEST ====="
+echo "===== INSTALL PATO INTO SAME SU2 PREFIX ====="
+rm -rf "$PREFIX/share/PATO"
+mkdir -p "$PREFIX/share/PATO"
 (
-  cd "$PREFIX/runtime"
-  find . -type f ! -name MANIFEST.sha256 -print0 | sort -z | xargs -0 sha256sum > MANIFEST.sha256
+  cd "$PATO"
+  tar --exclude='./.git' --exclude='*/__pycache__' --exclude='*.pyc' -cf - .
+) | (
+  cd "$PREFIX/share/PATO"
+  tar -xf -
 )
-echo "RUNTIME_MANIFEST_REFRESH=PASS"
+ln -sfn "share/PATO" "$PREFIX/PATO"
 
-echo
-echo "===== VERIFY SOURCE + RUNTIME ====="
-"$ROOT/verify_su2_nemo.sh" "$ROOT" "$PREFIX/runtime"
-"$PREFIX/runtime/verify_runtime.sh"
-
-PYTHONPATH="$PREFIX/runtime/python${PYTHONPATH:+:$PYTHONPATH}"   python3 - <<'PY'
-import pysu2
-print("PYSU2_IMPORT=PASS")
-PY
-
-echo
-echo "===== STABLE INSTALL LINKS ====="
-ln -sfnT "$PREFIX/runtime" "$PREFIX/current"
-
-if [[ -e "$PREFIX/bin" && ! -L "$PREFIX/bin" ]]; then
-  rm -rf "$PREFIX/bin.previous"
-  mv "$PREFIX/bin" "$PREFIX/bin.previous"
+mkdir -p "$PREFIX/etc/su2" "$PREFIX/tools"
+cat > "$PREFIX/etc/su2/activate_pato.sh" <<'EOF'
+#!/usr/bin/env bash
+_SU2_PREFIX="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+_SU2_PATO_ENV="${SU2_PATO_CONDA_ENV:-su2-nemo-pato}"
+_SU2_PATO_CONDA_BASE="${SU2_PATO_CONDA_BASE:-$HOME/miniconda3}"
+export ZSH_NAME="${ZSH_NAME:-}"
+if [ ! -f "$_SU2_PATO_CONDA_BASE/etc/profile.d/conda.sh" ]; then
+  echo "ERROR: conda.sh not found under $_SU2_PATO_CONDA_BASE"
+  return 1 2>/dev/null || exit 1
 fi
-ln -sfnT "$PREFIX/current/bin" "$PREFIX/bin"
+source "$_SU2_PATO_CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "$_SU2_PATO_ENV" || {
+  echo "ERROR: could not activate $_SU2_PATO_ENV"
+  return 1 2>/dev/null || exit 1
+}
+export PATO_DIR="$_SU2_PREFIX/share/PATO"
+export BUILD_DOCUMENTATION="${BUILD_DOCUMENTATION:-no}"
+source "$PATO_DIR/bashrc"
+export PATH="$PATO_DIR/install/bin:$PATH"
+export LD_LIBRARY_PATH="$PATO_DIR/install/lib:$PATO_DIR/src/thirdParty/mutation++/install/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [ "${WM_PROJECT_VERSION:-}" != "7" ]; then
+  echo "ERROR: PATO requires OpenFOAM-7"
+  return 1 2>/dev/null || exit 1
+fi
+case "${WM_PROJECT_DIR:-}" in
+  *OpenFOAM-v1706*)
+    echo "ERROR: OpenFOAM-v1706 contamination detected"
+    return 1 2>/dev/null || exit 1
+    ;;
+esac
+unset _SU2_PREFIX _SU2_PATO_ENV _SU2_PATO_CONDA_BASE
+EOF
+chmod 0755 "$PREFIX/etc/su2/activate_pato.sh"
+
+cat > "$PREFIX/tools/activate_pato.sh" <<EOF
+#!/usr/bin/env bash
+source "$PREFIX/etc/su2/activate_pato.sh"
+EOF
+chmod 0755 "$PREFIX/tools/activate_pato.sh"
+
+cat > "$PREFIX/bin/PATOx" <<EOF
+#!/usr/bin/env bash
+set -e
+source "$PREFIX/etc/su2/activate_pato.sh"
+exec "$PREFIX/share/PATO/install/bin/PATOx" "\$@"
+EOF
+chmod 0755 "$PREFIX/bin/PATOx"
+
+echo
+echo "===== INSTALL VALIDATED SU2-PATO COUPLING ====="
+[[ -f "$COUPLING/runtime/run_persistent_coupling.py" ]] || { echo "ERROR: persistent coupling runtime missing from source" >&2; exit 33; }
+rm -rf "$PREFIX/share/su2-pato"
+mkdir -p "$PREFIX/share/su2-pato"
+(
+  cd "$COUPLING"
+  tar --exclude='*/__pycache__' --exclude='*.pyc' -cf - .
+) | (
+  cd "$PREFIX/share/su2-pato"
+  tar -xf -
+)
+mkdir -p "$PREFIX/coupling"
+ln -sfn "../share/su2-pato" "$PREFIX/coupling/SU2_PATO"
+ln -sfn "share/su2-pato" "$PREFIX/SU2_PATO"
+
+cat > "$PREFIX/share/su2-pato/runtime/run_pysu2.sh" <<EOF
+#!/usr/bin/env bash
+set -e
+export SU2_HOME="$ROOT"
+export SU2_RUN="$PREFIX/bin"
+export PYTHONPATH="$PREFIX/bin\${PYTHONPATH:+:\$PYTHONPATH}"
+export MPP_DIRECTORY="$PREFIX/share/mutationpp"
+export MPP_DATA_DIRECTORY="$PREFIX/mpp-data"
+export LD_LIBRARY_PATH="$LIBDIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+exec "$PYTHON_BIN" "\$@"
+EOF
+chmod 0755 "$PREFIX/share/su2-pato/runtime/run_pysu2.sh"
+
+cat > "$PREFIX/bin/su2-pato" <<EOF
+#!/usr/bin/env bash
+set -e
+source "$PREFIX/etc/su2/activate_pato.sh"
+export SU2_ROOT="$PREFIX"
+export SU2_HOME="$ROOT"
+export SU2_RUN="$PREFIX/bin"
+export PYTHONPATH="$PREFIX/bin\${PYTHONPATH:+:\$PYTHONPATH}"
+export MPP_DIRECTORY="$PREFIX/share/mutationpp"
+export MPP_DATA_DIRECTORY="$PREFIX/mpp-data"
+exec "$PREFIX/share/su2-pato/runtime/run_persistent_coupling.sh" "\$@"
+EOF
+chmod 0755 "$PREFIX/bin/su2-pato"
+
+cat > "$PREFIX/etc/su2/activate.sh" <<EOF
+#!/usr/bin/env bash
+export SU2_HOME="$ROOT"
+export SU2_RUN="$PREFIX/bin"
+export PATH="$PREFIX/bin:\$PATH"
+export PYTHONPATH="$PREFIX/bin\${PYTHONPATH:+:\$PYTHONPATH}"
+export MPP_DIRECTORY="$PREFIX/share/mutationpp"
+export MPP_DATA_DIRECTORY="$PREFIX/mpp-data"
+export LD_LIBRARY_PATH="$LIBDIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+EOF
+chmod 0755 "$PREFIX/etc/su2/activate.sh"
+
+if [[ $PERSIST_SHELL -eq 1 ]]; then
+  BLOCK_START="# >>> SU2_UNIFIED_NEMO_PATO >>>"
+  if ! grep -Fq "$BLOCK_START" "$HOME/.bashrc"; then
+    cat >> "$HOME/.bashrc" <<EOF
+
+$BLOCK_START
+if [ -f "$PREFIX/etc/su2/activate.sh" ]; then
+  source "$PREFIX/etc/su2/activate.sh"
+fi
+# <<< SU2_UNIFIED_NEMO_PATO <<<
+EOF
+  fi
+fi
 
 SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
-SOURCE_BRANCH="$(git -C "$ROOT" branch --show-current)"
-MPP_COMMIT="$(git -C "$ROOT/subprojects/Mutationpp" rev-parse HEAD)"
+BUILD_SHA="$(sha256sum "$ROOT/build/SU2_CFD/src/SU2_CFD" | awk '{print $1}')"
+INSTALL_SHA="$(sha256sum "$PREFIX/bin/SU2_CFD.real" | awk '{print $1}')"
+BUILD_ID="$(readelf -n "$ROOT/build/SU2_CFD/src/SU2_CFD" | awk '/Build ID:/ {print $3; exit}')"
+INSTALL_ID="$(readelf -n "$PREFIX/bin/SU2_CFD.real" | awk '/Build ID:/ {print $3; exit}')"
 
-cat > "$PREFIX/INSTALLATION" <<EOF
-SOURCE_ROOT=$ROOT
-SOURCE_BRANCH=$SOURCE_BRANCH
-SOURCE_COMMIT=$SOURCE_COMMIT
+cat > "$PREFIX/UNIFIED_INSTALLATION" <<EOF
+INSTALL_LAYOUT=OFFICIAL_SU2_STYLE
+SU2_SOURCE=$ROOT
+SU2_INSTALL=$PREFIX
+SU2_COMMIT=$SOURCE_COMMIT
 MUTATIONPP_COMMIT=$MPP_COMMIT
-PREFIX=$PREFIX
+PATO_COMMIT=$PATO_COMMIT
+SU2_CFD_BUILD_SHA256=$BUILD_SHA
+SU2_CFD_INSTALLED_SHA256=$INSTALL_SHA
+SU2_CFD_BUILD_ID=$BUILD_ID
+SU2_CFD_INSTALLED_ID=$INSTALL_ID
+MUTATIONPP_LIBRARY=$MPP_LIB
+MUTATIONPP_DATA=$PREFIX/mpp-data
+PATO_DIR=$PREFIX/share/PATO
+COUPLING_DIR=$PREFIX/share/su2-pato
 EOF
 
 echo
-echo "============================================================"
-echo " SU2 NEMO INSTALL COMPLETE"
-echo "============================================================"
-echo "SOURCE_COMMIT=$SOURCE_COMMIT"
-echo "MUTATIONPP_COMMIT=$MPP_COMMIT"
-echo "SU2_CFD=$PREFIX/bin/SU2_CFD"
-echo "PYSU2_PYTHON=$PREFIX/bin/su2-nemo-python"
-echo "SU2_NEMO_INSTALL=PASS"
+echo "===== FINAL UNIFIED DOCTOR ====="
+"$ROOT/scripts/doctor.sh" --prefix "$PREFIX"
+
 echo
-echo "Add to PATH:"
-echo "  export PATH=\"$PREFIX/bin:\$PATH\""
+echo "============================================================"
+echo " UNIFIED SU2 INSTALL COMPLETE"
+echo "============================================================"
+echo "SU2_CFD=$PREFIX/bin/SU2_CFD"
+echo "PYSU2=$PREFIX/bin/su2-nemo-python"
+echo "PATOx=$PREFIX/bin/PATOx"
+echo "SU2_PATO=$PREFIX/bin/su2-pato"
+echo "UNIFIED_SU2_NEMO_PATO_INSTALL=PASS"

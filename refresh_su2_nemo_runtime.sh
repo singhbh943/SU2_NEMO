@@ -18,8 +18,13 @@ mkdir -p "$STAGE/bin" "$STAGE/libexec" "$STAGE/lib" "$STAGE/share/mutationpp" "$
 
 install -m 0755 "$BIN" "$STAGE/libexec/SU2_CFD.real"
 
+MPP_LIBS=()
 shopt -s nullglob
-MPP_LIBS=("$MPP_BUILD"/libmutation*.so*)
+for F in "$MPP_BUILD"/libmutation*.so*; do
+  if [ -f "$F" ] || [ -L "$F" ]; then
+    MPP_LIBS+=("$F")
+  fi
+done
 shopt -u nullglob
 [ "${#MPP_LIBS[@]}" -gt 0 ] || { echo "ERROR: Mutation++ shared library not found in $MPP_BUILD" >&2; exit 12; }
 cp -a "${MPP_LIBS[@]}" "$STAGE/lib/"

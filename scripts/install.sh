@@ -130,6 +130,14 @@ fi
 ENVADD
 
 echo
+echo "===== FINALIZE RUNTIME MANIFEST ====="
+(
+  cd "$PREFIX/runtime"
+  find . -type f ! -name MANIFEST.sha256 -print0 | sort -z | xargs -0 sha256sum > MANIFEST.sha256
+)
+echo "RUNTIME_MANIFEST_REFRESH=PASS"
+
+echo
 echo "===== VERIFY SOURCE + RUNTIME ====="
 "$ROOT/verify_su2_nemo.sh" "$ROOT" "$PREFIX/runtime"
 "$PREFIX/runtime/verify_runtime.sh"

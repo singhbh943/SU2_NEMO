@@ -1,43 +1,51 @@
 # Third-Party Notices
 
-This repository contains SU2-derived source and uses Mutation++ as a pinned Git submodule. It also references other upstream dependencies through SU2's existing submodule/build system.
+This repository is an SU2-derived source tree and contains pinned third-party submodules. This notice is informational and does not replace any component's actual license/legal files.
 
 ## SU2
 
-The repository retains the upstream SU2 license and attribution materials, including `COPYING`, `LICENSE.md`, `AUTHORS.md`, and the original source-file notices.
+Upstream: https://github.com/su2code/SU2
 
-The retained `COPYING` and `LICENSE.md` files contain GNU Lesser General Public License version 2.1 text. Those files, together with the notices in individual source files, govern the SU2-derived portions of this repository.
-
-Upstream project:
-
-https://github.com/su2code/SU2
+The repository retains SU2 license and attribution materials including `COPYING`, `LICENSE.md`, `AUTHORS.md`, and source-file notices.
 
 ## Mutation++
 
-Mutation++ is used through the pinned submodule:
+Pinned under:
 
 ```text
 subprojects/Mutationpp
 ```
 
-The v0.1.0 release line pins the hardened Mutation++ fork used by the validated build. The packaged runtime copies the submodule's license text into its documentation.
+Pinned fork: https://github.com/singhbh943/Mutationpp
 
-A license-metadata inconsistency is present in the pinned Mutation++ revision: its `COPYING` file contains GNU General Public License version 3 text, while its README badge identifies the project as LGPL v3. This notice does not attempt to reinterpret or replace those upstream materials. Users and redistributors should inspect the exact pinned submodule revision and its license/notices directly.
+Upstream: https://github.com/mutationpp/Mutationpp
 
-Pinned fork:
+The pinned revision's own license/legal files must be preserved. Its repository metadata is not fully consistent about GPL/LGPL labeling, so this project does not attempt to reinterpret those terms.
 
-https://github.com/singhbh943/Mutationpp
+## NASA PATO
 
-Upstream Mutation++ project:
+Pinned under:
 
-https://github.com/mutationpp/Mutationpp
+```text
+externals/PATO
+```
 
-## Other SU2 dependencies
+Pinned fork: https://github.com/singhbh943/pato
 
-Other dependencies referenced through SU2's existing build system and submodules remain subject to their own licenses and notices. This repository does not replace those terms.
+PATO contains its own legal documentation under `documentation/legal`, including NASA Open Source Agreement materials. Those materials must be preserved with source redistribution.
 
-## Release packaging
+## OpenFOAM / foam-extend / Conda toolchain
 
-The source release preserves the corresponding source, build scripts, submodule references, implementation records, and license files used to build the distributed runtime. Portable/runtime artifacts should be distributed together with their generated documentation and provenance files.
+PATO execution uses its compatible OpenFOAM-7 and foam-extend environment supplied through the PATO Conda environment. Those packages remain subject to their own licenses and notices and are not relicensed by this repository.
 
-This notice is informational and does not replace the actual license texts shipped with each component.
+## SU2-PATO coupling
+
+The persistent coupling implementation integrated under `coupling/SU2_PATO` is derived from the separately validated SU2-PATO-Coupling project. The v0.1.0 unified release line imports the validated runtime from commit:
+
+```text
+57ef14be32a4db4dedcfd8a2f6550299fe456ea0
+```
+
+## Redistribution
+
+Preserve corresponding source, pinned submodule references, build scripts, and the relevant license/legal files for every redistributed component or runtime package.

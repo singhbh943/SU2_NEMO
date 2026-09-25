@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+title: "SU2-NEMO Production Solver"
+message: "If you use this SU2-NEMO implementation, please cite this repository and the relevant upstream SU2 and Mutation++ publications."
+type: software
+version: 0.1.0
+date-released: 2026-09-26
+authors:
+  - family-names: "Singh"
+    given-names: "Bheem"
+repository-code: "https://github.com/singhbh943/SU2_NEMO"
+abstract: "Production-hardened SU2 NEMO implementation with Mutation++ support for AIR-5, AIR-7 and AIR-11 thermochemical nonequilibrium, catalytic-wall physics, implicit thermochemistry, extreme-Mach robustness, and PySU2."

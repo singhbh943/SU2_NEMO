@@ -1,97 +1,169 @@
-<p align="center">
-<img width="250" height="154" src="Docs/logoSU2small.png">
-</p>
+# SU2-NEMO Production Solver
 
+Production-hardened SU2 NEMO with Mutation++ support for thermochemical nonequilibrium, ionized air mixtures, catalytic-wall physics, implicit thermochemistry, and extreme-Mach robustness.
 
-# SU2 (ver. 8.5.0 "Harrier"): The Open-Source CFD Code
+This repository is an independently maintained SU2-derived implementation. It is not the upstream SU2 project. Upstream SU2 project information and license files are retained in this repository.
 
-Computational analysis tools have revolutionized the way we design engineering systems, but most established codes are proprietary, unavailable, or prohibitively expensive for many users. The SU2 team is changing this, making multiphysics analysis and design optimization freely available as open-source software and involving everyone in its creation and development.
+## Validated production coverage
 
-Please note that this project is released with a [Contributor Code of Conduct](CODE_OF_CONDUCT.md). By participating in this project you agree to abide by its terms.
+The v0.1.0 implementation includes:
 
-If you use the latest version of SU2, please cite [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17209057.svg)](https://doi.org/10.5281/zenodo.17209057) to acknowledge the active contributors.
+- AIR-5, AIR-7, and AIR-11 Mutation++ mixtures and mechanisms.
+- Two-temperature NEMO thermochemical nonequilibrium.
+- Ionization and finite-rate chemistry.
+- Explicit and implicit integration.
+- Non-catalytic, catalytic, and supercatalytic wall paths.
+- Accepted-state recovery and thermochemical admissibility/backtracking.
+- Implicit chemistry and vibrational/electronic-energy Jacobians.
+- AIR-11 pressure-derivative support.
+- Ambipolar Stefan-Maxwell diffusion.
+- Thread-safe Mutation++ transport.
+- Eigen DSO symbol isolation for Mutation++.
+- Exact catalytic species-flux heat reporting.
+- Transient thermochemical admissibility limiting.
+- AIR-11 supercatalytic N/O elemental conservation and zero net charge-flux enforcement.
+- PySU2 support built from the same source tree.
 
-Continuous Integration:<br/>
-[![Regression Testing](https://github.com/su2code/SU2/workflows/Regression%20Testing/badge.svg?branch=develop)](https://github.com/su2code/SU2/actions)
-[![Release](https://github.com/su2code/SU2/workflows/Release%20Management/badge.svg?branch=develop)](https://github.com/su2code/SU2/actions)
+For Mutation++ NEMO production cases, use:
 
-Code Quality:<br/>
-[![CodeFactor](https://www.codefactor.io/repository/github/su2code/su2/badge)](https://www.codefactor.io/repository/github/su2code/su2)
-
-# SU2 Introduction
-
-SU2 is a suite of open-source software tools written in C++ for the numerical solution of partial differential equations (PDE) and performing PDE constrained optimization.
-
-The primary applications are computational fluid dynamics and aerodynamic shape optimization, but has been extended to treat more general equations such as electrodynamics and chemically reacting flows.
-
-You will find more information and the latest news in:
-
-- SU2 Home Page: <https://su2code.github.io>
-- GitHub repository: <https://github.com/su2code>
-- CFD Online: <http://www.cfd-online.com/Forums/su2/>
-- Twitter: <https://twitter.com/su2code>
-- Facebook: <https://www.facebook.com/su2code>
-
-# SU2 Installation
-
-## Precompiled binaries for Linux, MacOS, Windows
-
-You can find precompiled binaries of the latest version on our [download page](https://su2code.github.io/download.html) or under [releases](https://github.com/su2code/SU2/releases).
-
-## Build SU2
-
-The build system of SU2 is based on a combination of [meson](http://mesonbuild.com/) (as the front-end) and [ninja](https://ninja-build.org/) (as the back-end). Meson is an open source build system meant to be both extremely fast, and, even more importantly, as user friendly as possible. Ninja is a small low-level build system with a focus on speed.
-
-Short summary of the minimal requirements:
-
-- C/C++ compiler
-- Python 3
-
-**Note:** all other necessary build tools and dependencies are shipped with the source code or are downloaded automatically.
-
-If you have these tools installed, you can create a configuration using the `meson.py` found in the root source code folder:
-
-```
-./meson.py setup build
+```text
+REF_DIMENSIONALIZATION= DIMENSIONAL
 ```
 
-Use `ninja` to compile and install the code
+## Source installation
 
-```
-./ninja -C build install
-```
+On Ubuntu, clone the release and build the complete solver stack:
 
-For more information on how to install and build SU2 on Linux, MacOS or Windows, have a look at the [documentation](https://su2code.github.io/docs_v7/).
+```bash
+git clone --branch v0.1.0 --recursive \
+  https://github.com/singhbh943/SU2_NEMO.git
 
-## SU2 Path setup
+cd SU2_NEMO
 
-When installation is complete, please be sure to add the `$SU2_HOME` and `$SU2_RUN` environment variables, and update your `$PATH` with `$SU2_RUN`.
-
-For example, add these lines to your `.bashrc` file:
-
-```
-export SU2_RUN="your_prefix/bin"
-export SU2_HOME="/path/to/SU2vX.X.X/"
-export PATH=$PATH:$SU2_RUN
-export PYTHONPATH=$SU2_RUN:$PYTHONPATH
+./scripts/install.sh \
+  --prefix "$HOME/SU2_NEMO" \
+  --install-deps
 ```
 
-`$SU2_RUN` should point to the folder where all binaries and python scripts were installed. This is the prefix you set with the --prefix option to meson. Note that the bin/ directory is automatically added to your prefix path.
+If the required compiler, CMake, Ninja, OpenMPI, and other dependencies are already installed, omit `--install-deps`:
 
-`$SU2_HOME` should point to the root directory of the source code distribution, i.e., `/path/to/SU2vX.X.X/`.
+```bash
+./scripts/install.sh \
+  --prefix "$HOME/SU2_NEMO" \
+  --jobs "$(nproc)"
+```
 
-Thanks for building, and happy optimizing!
+The installer initializes the pinned Mutation++ submodule, configures SU2 with Mutation++ and PySU2 enabled, builds the source tree, constructs a relocatable runtime, records provenance, and verifies the installation.
 
-- The SU2 Development Team
+## Verify the installation
 
-# SU2 Developers
+```bash
+./scripts/doctor.sh --prefix "$HOME/SU2_NEMO"
+```
 
-We follow the popular "GitFlow" branching model for scalable development. In the SU2 repository, the master branch represents the latest stable major or minor release (7.0, 6.2.0, etc.), it should only be modified during version releases. Work that is staged for release is put into the develop branch via Pull Requests on GitHub from various "feature" branches where folks do their day-to-day work on the code. At release time, the work that has been merged into the develop branch is pushed to the master branch and tagged as a release.
+A successful installation reports:
 
-SU2 is being developed by individuals and organized teams all around the world.
+```text
+SU2_NEMO_DOCTOR=PASS
+```
 
-A list of current contributors can be found in the AUTHORS.md file.
+The installed solver is available at:
 
-## Documentation
+```text
+$HOME/SU2_NEMO/bin/SU2_CFD
+```
 
-Code documentation can be generated by calling doxygen from the root of the project, then open Docs/html/index.html in a browser to consult the documentation.
+Add it to your shell path:
+
+```bash
+export PATH="$HOME/SU2_NEMO/bin:$PATH"
+```
+
+Then run a case normally:
+
+```bash
+SU2_CFD case.cfg
+```
+
+## PySU2
+
+The installer also builds and packages PySU2:
+
+```bash
+"$HOME/SU2_NEMO/bin/su2-nemo-python" your_script.py
+```
+
+or activate the runtime environment:
+
+```bash
+source "$HOME/SU2_NEMO/runtime/su2_nemo_env.sh"
+```
+
+## Updating an installation
+
+From a source checkout:
+
+```bash
+./scripts/update.sh --prefix "$HOME/SU2_NEMO"
+```
+
+The update path requires a clean tracked source tree and uses a fast-forward-only update.
+
+## Portable Linux runtime
+
+A verified source build can generate a portable Linux x86_64 runtime:
+
+```bash
+./make_su2_nemo_tarball.sh
+```
+
+The portable runtime includes the SU2_CFD executable, the required Mutation++ shared library and data, PySU2 runtime files, examples, provenance metadata, checksums, and verification tooling. Compatibility with the target system libraries, including glibc and OpenMPI, is still required.
+
+## Release validation
+
+The v0.1.0 installation workflow was validated from a fresh public GitHub clone into an independent installation prefix. The release gate verified:
+
+- a fresh source build;
+- pinned Mutation++ submodule provenance;
+- SU2_CFD runtime linkage to the packaged Mutation++ library;
+- PySU2 import from the installed runtime;
+- AIR-5, AIR-7, and AIR-11 mixture/mechanism data;
+- runtime SHA-256 manifest integrity;
+- clean Mutation++ library packaging;
+- installation provenance; and
+- the complete `doctor.sh` verification path.
+
+The validation establishes reproducibility of the software installation/runtime path. It does not by itself establish physical validation for every geometry, flow condition, material model, or numerical configuration.
+
+## Implementation record
+
+The permanent implementation report and patch records are stored under:
+
+```text
+validation_checkpoints/final_patches/
+```
+
+In particular:
+
+```text
+validation_checkpoints/final_patches/
+NEMO_EXTREME_MACH_PERMANENT_IMPLEMENTATION_REPORT.md
+```
+
+documents the hardened NEMO/Mutation++ implementation.
+
+## Upstream projects and licensing
+
+This repository is derived from SU2 and uses Mutation++ as a pinned submodule. Preserve the license and attribution files shipped with both projects.
+
+- SU2 license texts are retained in `COPYING` and `LICENSE.md`.
+- Mutation++ license text is retained by the pinned submodule and copied into the packaged runtime documentation.
+- See `THIRD_PARTY_NOTICES.md` for the release-specific notice, including a metadata inconsistency observed in the pinned Mutation++ revision.
+
+## Citation
+
+See `CITATION.cff` for this release. When publishing results, also cite the relevant upstream SU2 and Mutation++ publications.
+
+## Repository
+
+https://github.com/singhbh943/SU2_NEMO

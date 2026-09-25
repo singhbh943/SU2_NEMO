@@ -1,82 +1,135 @@
-# SU2 NEMO Production Solver
+# SU2-NEMO Installation
 
-Production-hardened SU2 NEMO with Mutation++ for AIR-5, AIR-7 and AIR-11 extreme-Mach thermochemical-nonequilibrium simulation.
+This document describes the supported v0.1.0 installation and runtime workflow.
 
-## Production coverage
+## Requirements
 
-- AIR-5, AIR-7, AIR-11
-- two-temperature NEMO
-- ionization and finite-rate chemistry
-- Mutation++ thermochemistry
-- explicit and implicit integration
-- non-catalytic and catalytic wall paths
-- accepted-state recovery and admissibility/backtracking
-- implicit chemistry and vibrational/electronic-energy Jacobians
-- AIR11 pressure derivative support
-- ambipolar Stefan-Maxwell diffusion
-- thread-safe Mutation++ transport
-- Eigen DSO symbol isolation
-- exact catalytic species-flux heat reporting
-- dimensional Mutation++ production contract
-
-For Mutation++ production cases:
-
-```text
-REF_DIMENSIONALIZATION= DIMENSIONAL
-```
-
-## Fastest method: portable TAR
-
-```bash
-tar -xzf SU2_NEMO-portable-linux-x86_64.tar.gz
-cd SU2_NEMO-*
-./verify_runtime.sh
-export PATH="$PWD/bin:$PATH"
-SU2_CFD case.cfg
-```
-
-No SU2 rebuild is needed on a compatible Linux x86_64 machine. The wrapper configures Mutation++ library/data paths automatically. Compatible system libraries (notably glibc/OpenMPI) are still required.
-
-## Fresh source installation
-
-Run dependencies once:
+The source installer is intended for a compatible Linux system. The Ubuntu dependency helper installs the build tools used by the validated release:
 
 ```bash
 ./install_dependencies_ubuntu.sh
 ```
 
-Then:
+The dependency set includes a C/C++ toolchain, Git, Python 3, CMake, Ninja, OpenMPI development/runtime packages, zlib development files, curl, and CA certificates.
+
+## Fresh source installation
+
+Clone the release:
+
+```bash
+git clone --branch v0.1.0 --recursive \
+  https://github.com/singhbh943/SU2_NEMO.git
+
+cd SU2_NEMO
+```
+
+Install everything under a dedicated prefix:
+
+```bash
+./scripts/install.sh \
+  --prefix "$HOME/SU2_NEMO" \
+  --install-deps
+```
+
+If dependencies are already present:
+
+```bash
+./scripts/install.sh \
+  --prefix "$HOME/SU2_NEMO" \
+  --jobs "$(nproc)"
+```
+
+The installer performs the following permanent steps:
+
+1. verifies the source checkout;
+2. initializes the pinned Mutation++ submodule;
+3. configures Meson with `enable-mpp=true` and `enable-pywrapper=true`;
+4. builds SU2_CFD, Mutation++, and PySU2;
+5. constructs the runtime under `<prefix>/runtime`;
+6. installs Mutation++ data and the required shared library;
+7. packages PySU2 and creates `su2-nemo-python`;
+8. regenerates the final SHA-256 runtime manifest;
+9. verifies the source and runtime; and
+10. creates stable `current` and `bin` links.
+
+## Verify
+
+Run:
+
+```bash
+./scripts/doctor.sh --prefix "$HOME/SU2_NEMO"
+```
+
+The expected final marker is:
+
+```text
+SU2_NEMO_DOCTOR=PASS
+```
+
+## Run SU2_CFD
+
+```bash
+export PATH="$HOME/SU2_NEMO/bin:$PATH"
+SU2_CFD case.cfg
+```
+
+For Mutation++ NEMO production cases:
+
+```text
+REF_DIMENSIONALIZATION= DIMENSIONAL
+```
+
+## Run PySU2
+
+```bash
+"$HOME/SU2_NEMO/bin/su2-nemo-python" your_script.py
+```
+
+The wrapper configures the packaged Python, Mutation++ data, Mutation++ shared-library path, and OpenMPI OSC setting.
+
+## Update
+
+From the checked-out source tree:
+
+```bash
+./scripts/update.sh --prefix "$HOME/SU2_NEMO"
+```
+
+The updater refuses tracked local modifications and uses a fast-forward-only Git update before rebuilding/revalidating.
+
+## Release/source verification
+
+Before packaging or publishing a source state:
+
+```bash
+./scripts/release_check.sh
+```
+
+The check validates script syntax, NEMO source markers, the Mutation++ submodule gitlink and repository metadata, implementation-report presence, release placeholders, and—when initialized—the pinned Mutation++ revision and AIR-5/AIR-7/AIR-11 data.
+
+## Portable runtime
+
+After a verified source build:
+
+```bash
+./make_su2_nemo_tarball.sh
+```
+
+The resulting Linux x86_64 package can be verified with:
+
+```bash
+./verify_runtime.sh
+```
+
+A portable binary runtime still depends on compatible host system libraries such as glibc and OpenMPI.
+
+## Compatibility entry points
+
+The historical top-level commands remain as compatibility wrappers:
 
 ```bash
 ./install_su2_nemo.sh
-export PATH="$HOME/SU2_NEMO/bin:$PATH"
-```
-
-## Future source update (no apt reinstall)
-
-```bash
-cd ~/SU2_NEMO/source
 ./update_su2_nemo.sh
 ```
 
-## Portable update without compiling
-
-From an extracted portable package:
-
-```bash
-./tools/update_portable_su2_nemo.sh
-```
-
-The latest verified runtime is installed version-by-version under `~/SU2_NEMO_PORTABLE` and exposed through a stable `bin` symlink.
-
-## Manager
-
-```bash
-./su2_nemo_manager.sh deps
-./su2_nemo_manager.sh install
-./su2_nemo_manager.sh update
-./su2_nemo_manager.sh verify
-./su2_nemo_manager.sh tar
-./su2_nemo_manager.sh portable-update
-./su2_nemo_manager.sh status
-```
+New usage should prefer `scripts/install.sh`, `scripts/update.sh`, and `scripts/doctor.sh`.

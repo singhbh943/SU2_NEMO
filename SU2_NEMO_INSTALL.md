@@ -15,7 +15,7 @@ Prerequisite: Miniconda/Conda is available. The validated setup uses `~/minicond
 
 ```bash
 mkdir -p "$HOME/SU2"
-git clone --branch su2-nemo-installable-v0.1.0 --recursive \
+git clone --branch v0.1.0 --recursive \
   https://github.com/singhbh943/SU2_NEMO.git \
   "$HOME/SU2/SU2"
 

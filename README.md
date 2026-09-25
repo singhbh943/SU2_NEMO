@@ -38,7 +38,7 @@ Miniconda is required for the PATO toolchain. With Miniconda available under `~/
 ```bash
 mkdir -p "$HOME/SU2"
 
-git clone --branch su2-nemo-installable-v0.1.0 --recursive \
+git clone --branch v0.1.0 --recursive \
   https://github.com/singhbh943/SU2_NEMO.git \
   "$HOME/SU2/SU2"
 
@@ -51,7 +51,7 @@ cd "$HOME/SU2/SU2"
   --persist-shell
 ```
 
-After the v0.1.0 tag is published, replace the branch name above with `v0.1.0`.
+The `v0.1.0` tag is the immutable validated release described on the GitHub Releases page.
 
 The installer builds SU2 with:
 

@@ -295,6 +295,8 @@ mkdir -p "$PREFIX/share/su2-pato"
 mkdir -p "$PREFIX/coupling"
 ln -sfn "../share/su2-pato" "$PREFIX/coupling/SU2_PATO"
 ln -sfn "share/su2-pato" "$PREFIX/SU2_PATO"
+chmod 0755 "$PREFIX/share/su2-pato/runtime/run_persistent_coupling.sh"
+chmod 0755 "$PREFIX/share/su2-pato/runtime/run_persistent_coupling.py"
 
 cat > "$PREFIX/share/su2-pato/runtime/run_pysu2.sh" <<EOF
 #!/usr/bin/env bash
